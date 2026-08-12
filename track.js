@@ -299,11 +299,23 @@ export const RUNOFF_TUNING = {
   // Skirt width in road half-widths, at demandFloor and at demand 1.0.
   widthMin: 0.45,
   widthMax: 1.30,
-  // Where the skirt runs. Cars run wide from about the apex onwards, and the
-  // classic place to find one is the corner EXIT, so the band starts partway
-  // into the corner and continues past its end.
-  fromFrac: 0.35,       // of the corner's length, from its start
-  exitFrac: 0.40,       // extra length past the corner's end, in corner lengths
+  // Where the skirt runs. Cars run wide from about the apex onwards and the
+  // classic place to find one is the corner EXIT, but a skirt that only spans
+  // that reads as a parking bay rather than a runoff: real ones start near the
+  // turn-in (where a missed brake point puts you off) and run well down the
+  // following straight. So the band opens just after the corner starts and
+  // continues for most of another corner length past its end.
+  fromFrac: 0.16,       // of the corner's length, from its start
+  exitFrac: 1.00,       // extra length past the corner's end, in corner lengths
+  // ...but the exit tail is also capped against the straight it runs down, as
+  // a fraction of the gap to the next corner. Without this the extent has to
+  // be tuned for the tightest circuit and everywhere else gets stubby bays:
+  // a coil whose corners are 90 px apart pours into one unbroken ring long
+  // before a track with real straights gets a tail worth the name. Capping
+  // per-gap lets the fraction stay generous and keeps bare track before the
+  // next turn-in, which is what makes the concrete read as runoff at all.
+  exitMaxRoads: 6.0,    // hard ceiling on the tail, in road half-widths
+  exitGapFrac: 0.55,    // ...and never more than this much of the gap ahead
   // Taper at each end, as a fraction of the band's own length: concrete never
   // starts with a step.
   taper: 0.28,
@@ -614,8 +626,14 @@ export function buildTrack(def) {
       corners.push({ lo, hi, peakIdx, len, peakK, turnDeg: turn * 180 / Math.PI });
     }
 
-    for (const c of corners) {
+    for (let ci = 0; ci < corners.length; ci++) {
+      const c = corners[ci];
       if (c.turnDeg < t.minTurnDeg) continue;      // a kink, not a corner
+      // Distance from this corner's exit to where the next one starts — the
+      // straight the tail runs down. Wraps at the line.
+      const next = corners[(ci + 1) % corners.length];
+      const gapAhead = corners.length < 2 ? TRACK_LEN
+        : ((CUMLEN[next.lo] - CUMLEN[c.hi]) % TRACK_LEN + TRACK_LEN) % TRACK_LEN;
       const radius = 1 / Math.abs(c.peakK);
       // How fast a reference car goes round here, as a fraction of a reference
       // top speed. THIS is the "how much runoff is warranted" number: a corner
@@ -630,7 +648,9 @@ export function buildTrack(def) {
       const side = c.peakK > 0 ? -1 : 1;
       const arr = side > 0 ? RUNOFF_POS : RUNOFF_NEG;
       const fromArc = CUMLEN[c.lo] + c.len * t.fromFrac;
-      const bandLen = c.len * (1 - t.fromFrac + t.exitFrac);
+      const exitLen = Math.min(c.len * t.exitFrac, t.exitMaxRoads * ROAD_HALF,
+        gapAhead * t.exitGapFrac);
+      const bandLen = c.len * (1 - t.fromFrac) + exitLen;
       const ramp = Math.max(1, bandLen * t.taper);
       let idx = indexAtArc(fromArc), gone = 0;
       while (gone <= bandLen) {
