@@ -259,6 +259,61 @@ export function buildCenterline(pts, samplesPerSeg) {
 const GRID_CELL = 32;
 const GRID_REACH = 80;     // px of segments kept per cell; beyond this, rescan
 
+// ------------------------------------------------------- the concrete runoff
+//
+// A THIRD SURFACE, placed the way a real circuit places it: a concrete skirt on
+// the OUTSIDE of the corners cars actually run wide at, tapering in and out,
+// and nowhere else. It is derived from the geometry — curvature magnitude says
+// how demanding the corner is, curvature SIGN says which side is the outside —
+// so it keeps working on a circuit nobody has drawn yet, and there is not one
+// hand-placed skirt anywhere in the track definitions.
+//
+// The model, in one line: a corner's demand is the speed a reference car can
+// carry through it, as a fraction of a reference top speed. A corner taken at
+// 97% of top speed (Longshore's radius-260 sweepers) is where a car leaves the
+// road at 250 px/s and needs somewhere to go; a 65%-of-top-speed corner
+// (Lantern's radius-110 lobes) is one you arrive at slowly and only trickle
+// off. Faster corner => wider skirt, exactly as at a real track.
+export const RUNOFF_TUNING = {
+  // Curvature sampling span (centerline points either side) — matches the
+  // corner analyser in bots.js so both agree on where the corners are.
+  curvSpan: 6,
+  // A corner begins when the centerline radius drops below this many road
+  // half-widths, and ends when it climbs back past cornerExitHyst x that.
+  cornerRoads: 8,
+  cornerExitHyst: 1.6,
+  // ...and it only counts as a corner worth protecting if it actually changes
+  // direction this much. This is what keeps a gentle linking kink (Lantern's
+  // 9-19 degrees kinks) from collecting a skirt and turning "runoff at the
+  // corners" into "runoff everywhere".
+  minTurnDeg: 25,
+  // Pricing a corner's demand: a reference lateral budget (px/s^2) and the
+  // reference top speed the resulting corner speed is compared against. Both
+  // are FIXED, not the player's current car: the concrete does not get poured
+  // again when someone buys an upgrade.
+  latRef: 300,
+  vRef: 280,
+  // Only corners above this demand get concrete at all (below it, the corner
+  // is slow enough that going off costs you the corner, not the race).
+  demandFloor: 0.55,
+  // Skirt width in road half-widths, at demandFloor and at demand 1.0.
+  widthMin: 0.45,
+  widthMax: 1.30,
+  // Where the skirt runs. Cars run wide from about the apex onwards, and the
+  // classic place to find one is the corner EXIT, so the band starts partway
+  // into the corner and continues past its end.
+  fromFrac: 0.35,       // of the corner's length, from its start
+  exitFrac: 0.40,       // extra length past the corner's end, in corner lengths
+  // Taper at each end, as a fraction of the band's own length: concrete never
+  // starts with a step.
+  taper: 0.28,
+  // Two skirts separated by less than this many road half-widths are one
+  // skirt. A double-apex corner (Longshore's are two 45 degrees arcs with a
+  // 70 px link) is a single place a car runs wide, and paving it as two slabs
+  // with a metre of grass between them would be both ugly and a trap.
+  gapCloseRoads: 3,
+};
+
 export function buildTrack(def) {
   const ROAD_HALF = def.roadHalf;
   const { control: CONTROL, segFrom, total } = pathPoints(def);
@@ -289,19 +344,41 @@ export function buildTrack(def) {
   };
 
   // A gate is a segment across the road, plus the forward direction of travel.
-  const makeGate = idx => {
+  // `wPos` / `wNeg` are its half-widths on the +normal and -normal sides; they
+  // default to the old symmetric "road plus a bit". Checkpoint gates override
+  // them (see cpGate) to reach well out into the runoff and the grass on the
+  // OUTSIDE of the corner while staying tight on the inside.
+  const makeGate = (idx, wPos, wNeg) => {
     const p = CENTER[idx];
     const q = CENTER[(idx + 1) % N];
     const dx = q[0] - p[0], dy = q[1] - p[1];
     const len = Math.hypot(dx, dy) || 1;
     const fx = dx / len, fy = dy / len;       // forward (travel) direction
     const nx = -fy, ny = fx;                  // normal across the road
-    const w = ROAD_HALF + 8;
+    const wp = wPos ?? (ROAD_HALF + 8), wn = wNeg ?? (ROAD_HALF + 8);
     return {
-      x: p[0], y: p[1], fx, fy,
-      ax: p[0] + nx * w, ay: p[1] + ny * w,
-      bx: p[0] - nx * w, by: p[1] - ny * w,
+      x: p[0], y: p[1], fx, fy, idx,
+      ax: p[0] + nx * wp, ay: p[1] + ny * wp,
+      bx: p[0] - nx * wn, by: p[1] - ny * wn,
     };
+  };
+
+  // Signed Menger curvature (1/px) at a centerline index. The SIGN is the one
+  // fact everything about runoff and gate placement turns on: it is positive
+  // when the track bends toward +normal (normal = (-fy, fx) of the direction of
+  // travel), so the OUTSIDE of the corner — where a car runs wide — is the
+  // -normal side, and vice versa.
+  const curvSigned = (idx, span = RUNOFF_TUNING.curvSpan) => {
+    const a = CENTER[((idx - span) % N + N) % N];
+    const b = CENTER[idx];
+    const c = CENTER[(idx + span) % N];
+    const ab = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const bc = Math.hypot(c[0] - b[0], c[1] - b[1]);
+    const ca = Math.hypot(a[0] - c[0], a[1] - c[1]);
+    const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    const denom = ab * bc * ca;
+    if (denom < 1e-9) return 0;
+    return (2 * cross) / denom;               // magnitude 2*area/(abc), signed
   };
 
   // Segment i's span as lap fractions (the definition's ideal arc length and
@@ -312,10 +389,39 @@ export function buildTrack(def) {
     return [from, to];
   };
 
+  // The START/FINISH line stays the old narrow, symmetric, DIRECTIONAL gate:
+  // it is the one gate a lap can be completed on, so it must not be reachable
+  // from the runoff or crossable backwards (see advanceLap).
   const START_GATE = makeGate(0);
+
+  // CHECKPOINT GATES REACH PAST THE ROAD, ASYMMETRICALLY.
+  //
+  // Why past the road: a checkpoint you can miss by putting two wheels on the
+  // concrete is a checkpoint that punishes the exact mistake the runoff exists
+  // to forgive. So on the OUTSIDE of the corner the gate runs CP_OUT road
+  // half-widths beyond the road edge — clear of the widest skirt, out into the
+  // grass.
+  //
+  // Why asymmetrically: the gates exist to make cutting unprofitable, and a
+  // cut goes across the INSIDE of the corner. Extending the inside end is the
+  // one change that could hand a cheater a gate they never earned, so the
+  // inside end grows barely at all (CP_IN, ~half a road half-width, against
+  // the old flat 8 px). On a gate that sits on a straight there is no inside
+  // or outside, so both ends get CP_MID and the widening is symmetric.
+  const CP_OUT = 2.0, CP_IN = 0.5, CP_MID = 1.0;
+  const cpGate = idx => {
+    const k = curvSigned(idx);
+    // 0 on a straight, 1 in a corner as tight as the corner threshold.
+    const t = Math.min(1, Math.abs(k) * RUNOFF_TUNING.cornerRoads * ROAD_HALF);
+    const eOut = ROAD_HALF * (CP_MID + (CP_OUT - CP_MID) * t);
+    const eIn = ROAD_HALF * (CP_MID + (CP_IN - CP_MID) * t);
+    // k > 0 bends toward +normal, so +normal is the INSIDE of the corner.
+    return makeGate(idx, ROAD_HALF + (k > 0 ? eIn : eOut),
+      ROAD_HALF + (k > 0 ? eOut : eIn));
+  };
   const CHECKPOINTS = def.checkpoints.map(([seg, f]) => {
     const [from, to] = segSpan(seg);
-    return makeGate(indexAtFraction(from + (to - from) * f));
+    return cpGate(indexAtFraction(from + (to - from) * f));
   });
 
   // Named sections, as arc-length fractions of the lap. Used by the harness to
@@ -345,13 +451,19 @@ export function buildTrack(def) {
   };
   const START_ANGLE = Math.atan2(START_GATE.fy, START_GATE.fx);
 
-  // Squared distance from a point to centerline segment i.
+  // Squared distance from a point to centerline segment i. `HIT` carries the
+  // parameter along the segment and the SIDE the point is on out of the hot
+  // loop without allocating (this runs millions of times in a sweep).
+  const HIT = { t: 0, side: 0 };
   const segDist2 = (i, x, y) => {
     const a = CENTER[i], b = CENTER[(i + 1) % N];
     const abx = b[0] - a[0], aby = b[1] - a[1];
     const t = Math.max(0, Math.min(1,
       ((x - a[0]) * abx + (y - a[1]) * aby) / (abx * abx + aby * aby)));
     const dx = x - (a[0] + abx * t), dy = y - (a[1] + aby * t);
+    HIT.t = t;
+    // Sign of (p - a) . normal, normal = (-aby, abx): +1 = the +normal side.
+    HIT.side = ((x - a[0]) * -aby + (y - a[1]) * abx) >= 0 ? 1 : -1;
     return dx * dx + dy * dy;
   };
 
@@ -386,26 +498,38 @@ export function buildTrack(def) {
     return { minX, minY, cols, rows, cells, bounds };
   })();
 
-  const distToTrack = (x, y) => {
+  // Nearest point on the centerline: distance, which segment, how far along it
+  // and which side of it. Written into a reused object (NEAR) rather than
+  // returned fresh, because this is the single hottest function in the whole
+  // simulation. distToTrack and surfaceAt are both thin wrappers over it, so
+  // they can never disagree about where the edge of the road is.
+  const NEAR = { dist: 0, idx: 0, t: 0, side: 1 };
+  const closest = (x, y) => {
+    let best = Infinity, bi = 0, bt = 0, bs = 1, done = false;
     const c = Math.floor((x - GRID.minX) / GRID_CELL);
     const r = Math.floor((y - GRID.minY) / GRID_CELL);
     if (c >= 0 && r >= 0 && c < GRID.cols && r < GRID.rows) {
       const list = GRID.cells[r * GRID.cols + c];
-      let best = Infinity;
       for (let k = 0; k < list.length; k++) {
         const d = segDist2(list[k], x, y);
-        if (d < best) best = d;
+        if (d < best) { best = d; bi = list[k]; bt = HIT.t; bs = HIT.side; }
       }
       // Inside the cached reach the shortlist is provably complete.
-      if (best <= GRID_REACH * GRID_REACH) return Math.sqrt(best);
+      if (best <= GRID_REACH * GRID_REACH) done = true;
     }
-    let best = Infinity;
-    for (let i = 0; i < N; i++) {
-      const d = segDist2(i, x, y);
-      if (d < best) best = d;
+    if (!done) {
+      best = Infinity;
+      for (let i = 0; i < N; i++) {
+        const d = segDist2(i, x, y);
+        if (d < best) { best = d; bi = i; bt = HIT.t; bs = HIT.side; }
+      }
     }
-    return Math.sqrt(best);
+    NEAR.dist = Math.sqrt(best);
+    NEAR.idx = bi; NEAR.t = bt; NEAR.side = bs;
+    return NEAR;
   };
+
+  const distToTrack = (x, y) => closest(x, y).dist;
 
   // Nearest centerline index searched only within `window` points of a hint
   // index. Fast (O(window)) and correct as long as the query point moves
@@ -444,6 +568,174 @@ export function buildTrack(def) {
     return denom < 1e-9 ? 0 : (2 * area2) / denom;
   };
 
+  // ------------------------------------------------- the runoff, derived
+  //
+  // Two width arrays, one per side of the centerline, in px BEYOND the road
+  // edge. Everything about them falls out of the geometry: which runs of
+  // centerline are corners (curvature magnitude + hysteresis), how much
+  // direction each one actually changes (so a linking kink is not a corner),
+  // how demanding it is (the speed a reference car carries through it) and
+  // which side is the outside (curvature sign).
+  const RUNOFF_POS = new Float32Array(N);
+  const RUNOFF_NEG = new Float32Array(N);
+  const RUNOFF_CORNERS = [];         // reporting: one entry per skirt
+  (() => {
+    const t = RUNOFF_TUNING;
+    const kEnter = 1 / (t.cornerRoads * ROAD_HALF);
+    const kExit = kEnter / t.cornerExitHyst;
+    const K = new Float64Array(N);
+    for (let i = 0; i < N; i++) K[i] = curvSigned(i, t.curvSpan);
+    const used = new Uint8Array(N);
+    const corners = [];
+    for (let i = 0; i < N; i++) {
+      if (used[i] || Math.abs(K[i]) < kEnter) continue;
+      const dir = K[i] < 0 ? -1 : 1;
+      const same = j => (K[j] < 0 ? -1 : 1) === dir && Math.abs(K[j]) >= kExit;
+      let lo = i, hi = i;
+      for (let s = 1; s < N; s++) {
+        const j = ((i - s) % N + N) % N;
+        if (!same(j) || used[j]) break;
+        lo = j;
+      }
+      for (let s = 1; s < N; s++) {
+        const j = (i + s) % N;
+        if (!same(j) || used[j]) break;
+        hi = j;
+      }
+      let peakK = 0, peakIdx = lo, turn = 0, len = 0;
+      for (let j = lo; ; j = (j + 1) % N) {
+        used[j] = 1;
+        if (Math.abs(K[j]) > Math.abs(peakK)) { peakK = K[j]; peakIdx = j; }
+        const dl = CUMLEN[j + 1] - CUMLEN[j];
+        turn += Math.abs(K[j]) * dl;      // integrated |curvature| = radians turned
+        len += dl;
+        if (j === hi) break;
+      }
+      corners.push({ lo, hi, peakIdx, len, peakK, turnDeg: turn * 180 / Math.PI });
+    }
+
+    for (const c of corners) {
+      if (c.turnDeg < t.minTurnDeg) continue;      // a kink, not a corner
+      const radius = 1 / Math.abs(c.peakK);
+      // How fast a reference car goes round here, as a fraction of a reference
+      // top speed. THIS is the "how much runoff is warranted" number: a corner
+      // you take at 97% of top speed throws a car a long way; one you take at
+      // 60% barely throws it at all.
+      const demand = Math.min(t.vRef, Math.sqrt(t.latRef * radius)) / t.vRef;
+      if (demand < t.demandFloor) continue;
+      const u = (demand - t.demandFloor) / (1 - t.demandFloor);
+      const w = ROAD_HALF * (t.widthMin + (t.widthMax - t.widthMin) * u);
+      // The outside of the corner: curvature > 0 bends toward +normal, so the
+      // car runs out toward -normal.
+      const side = c.peakK > 0 ? -1 : 1;
+      const arr = side > 0 ? RUNOFF_POS : RUNOFF_NEG;
+      const fromArc = CUMLEN[c.lo] + c.len * t.fromFrac;
+      const bandLen = c.len * (1 - t.fromFrac + t.exitFrac);
+      const ramp = Math.max(1, bandLen * t.taper);
+      let idx = indexAtArc(fromArc), gone = 0;
+      while (gone <= bandLen) {
+        const f = Math.min(1, Math.min(gone, bandLen - gone) / ramp);
+        const v = w * f;
+        if (v > arr[idx]) arr[idx] = v;
+        gone += CUMLEN[idx + 1] - CUMLEN[idx];
+        idx = (idx + 1) % N;
+      }
+      RUNOFF_CORNERS.push({
+        from: (fromArc % TRACK_LEN) / TRACK_LEN,
+        to: ((fromArc + bandLen) % TRACK_LEN) / TRACK_LEN,
+        len: bandLen, width: w, radius, demand, side,
+        turnDeg: c.turnDeg, sector: sectorAt((CUMLEN[c.peakIdx] / TRACK_LEN) % 1),
+      });
+    }
+
+    // Bridge short gaps: a double-apex corner is one corner as far as running
+    // wide is concerned.
+    const gapMax = t.gapCloseRoads * ROAD_HALF;
+    for (const arr of [RUNOFF_POS, RUNOFF_NEG]) {
+      for (let i = 0; i < N; i++) {
+        if (arr[i] > 0) continue;
+        let gone = 0, j = i, n = 0;
+        while (arr[j] <= 0 && gone <= gapMax && n < N) {
+          gone += CUMLEN[j + 1] - CUMLEN[j];
+          j = (j + 1) % N; n++;
+        }
+        if (n >= N || gone > gapMax) continue;             // not a short gap
+        const before = arr[((i - 1) % N + N) % N], after = arr[j];
+        if (before <= 0 || after <= 0) continue;           // not between skirts
+        const fill = Math.min(before, after);
+        for (let k = 0, m = i; k < n; k++, m = (m + 1) % N) arr[m] = fill;
+      }
+    }
+  })();
+
+  // Fraction of the lap that has concrete on at least one side, and the total
+  // skirt area — both are reported by the harness so "at the corners, not
+  // everywhere" is a measured claim rather than an intention.
+  const RUNOFF_COVERAGE = (() => {
+    let covered = 0;
+    for (let i = 0; i < N; i++) {
+      if (RUNOFF_POS[i] > 0 || RUNOFF_NEG[i] > 0) covered += CUMLEN[i + 1] - CUMLEN[i];
+    }
+    return covered / TRACK_LEN;
+  })();
+
+  // Width of the skirt (px beyond the road edge) at a point on the centerline,
+  // linearly interpolated between samples so the boundary is smooth.
+  const runoffWidth = (idx, t2, side) => {
+    const arr = side > 0 ? RUNOFF_POS : RUNOFF_NEG;
+    const a = arr[idx], b = arr[(idx + 1) % N];
+    return a + (b - a) * t2;
+  };
+
+  // THE SURFACE QUERY. `probe` answers "where am I and what am I standing on"
+  // in one pass — callers that need both (the bot race recorder wants the
+  // surface for the physics AND the distance for its on-road margin) must not
+  // pay for two nearest-point searches per tick.
+  const probe = (x, y) => {
+    const p = closest(x, y);
+    p.surface = p.dist <= ROAD_HALF ? 0
+      : p.dist <= ROAD_HALF + runoffWidth(p.idx, p.t, p.side) ? 1 : 2;
+    return p;
+  };
+  const surfaceAt = (x, y) => probe(x, y).surface;
+
+  // Renderable runoff bands: closed polygons hugging the road edge on the
+  // inside and the skirt's outer boundary on the outside. Built here rather
+  // than in main.js so the picture is generated from the same arrays the
+  // physics reads — a band you can see is a band you can drive on.
+  const RUNOFF_BANDS = (() => {
+    const bands = [];
+    const vnorm = i => {
+      const a = CENTER[(i - 1 + N) % N], b = CENTER[(i + 1) % N];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const L = Math.hypot(dx, dy) || 1;
+      return [-dy / L, dx / L];
+    };
+    for (const [arr, sgn] of [[RUNOFF_POS, 1], [RUNOFF_NEG, -1]]) {
+      let start = -1;
+      for (let k = 0; k < N; k++) if (arr[k] <= 0) { start = k; break; }
+      if (start < 0) continue;                 // never happens: see coverage
+      let run = null;
+      for (let k = 0; k <= N; k++) {
+        const i = (start + k) % N;
+        if (arr[i] > 0) { (run || (run = [])).push(i); continue; }
+        if (!run) continue;
+        const inner = [], outer = [];
+        for (const j of run) {
+          const [nx, ny] = vnorm(j);
+          inner.push([CENTER[j][0] + sgn * nx * ROAD_HALF,
+            CENTER[j][1] + sgn * ny * ROAD_HALF]);
+          const o = ROAD_HALF + arr[j];
+          outer.push([CENTER[j][0] + sgn * nx * o, CENTER[j][1] + sgn * ny * o]);
+        }
+        outer.reverse();
+        bands.push(inner.concat(outer));
+        run = null;
+      }
+    }
+    return bands;
+  })();
+
   // Cheap identity for "this track". Bot races are simulated on demand and
   // cached against (car spec + track), so the cache has to notice which track
   // it is looking at — editing a definition's geometry, its road width or its
@@ -453,7 +745,10 @@ export function buildTrack(def) {
     for (const p of CONTROL) {
       for (const v of p) { h ^= Math.round(v); h = Math.imul(h, 16777619); }
     }
-    return `${def.id}:${(h >>> 0).toString(36)}:${N}:${ROAD_HALF}:${Math.round(TRACK_LEN)}`;
+    // The runoff changes how the car behaves, so it belongs in the key the bot
+    // field is cached under.
+    return `${def.id}:${(h >>> 0).toString(36)}:${N}:${ROAD_HALF}:` +
+      `${Math.round(TRACK_LEN)}:r${Math.round(1000 * RUNOFF_COVERAGE)}`;
   })();
 
   return {
@@ -462,8 +757,10 @@ export function buildTrack(def) {
     ROAD_HALF, CONTROL, CENTER, N, CUMLEN, TRACK_LEN,
     START_GATE, START_POS, START_ANGLE, CHECKPOINTS, SECTORS, TRACK_SIGNATURE,
     bounds: GRID.bounds,
+    RUNOFF_POS, RUNOFF_NEG, RUNOFF_BANDS, RUNOFF_CORNERS, RUNOFF_COVERAGE,
     indexAtFraction, indexAtArc, makeGate, segSpan, sectorAt,
-    distToTrack, nearestIndex, nearestIndexNear, curvatureAt,
+    distToTrack, nearestIndex, nearestIndexNear, curvatureAt, curvSigned,
+    surfaceAt, runoffWidth, closest, probe,
     isOffRoad: (x, y) => distToTrack(x, y) > ROAD_HALF,
   };
 }
@@ -498,6 +795,9 @@ export let START_ANGLE = 0;
 export let CHECKPOINTS = [];
 export let SECTORS = [];
 export let TRACK_SIGNATURE = "";
+export let RUNOFF_BANDS = [];
+export let RUNOFF_CORNERS = [];
+export let RUNOFF_COVERAGE = 0;
 
 export function setTrack(id) {
   const t = getTrackData(id);
@@ -508,6 +808,8 @@ export function setTrack(id) {
   START_GATE = t.START_GATE; START_POS = t.START_POS; START_ANGLE = t.START_ANGLE;
   CHECKPOINTS = t.CHECKPOINTS; SECTORS = t.SECTORS;
   TRACK_SIGNATURE = t.TRACK_SIGNATURE;
+  RUNOFF_BANDS = t.RUNOFF_BANDS; RUNOFF_CORNERS = t.RUNOFF_CORNERS;
+  RUNOFF_COVERAGE = t.RUNOFF_COVERAGE;
   return t;
 }
 setTrack(DEFAULT_TRACK);
@@ -523,6 +825,13 @@ export const nearestIndex = (x, y) => TRACK.nearestIndex(x, y);
 export const nearestIndexNear = (x, y, hint, window = 30) =>
   TRACK.nearestIndexNear(x, y, hint, window);
 export const curvatureAt = (idx, span = 4) => TRACK.curvatureAt(idx, span);
+export const curvSigned = (idx, span) => TRACK.curvSigned(idx, span);
+// The three-surface query: SURFACE.ROAD / RUNOFF / GRASS (physics.js).
+export const surfaceAt = (x, y) => TRACK.surfaceAt(x, y);
+export const runoffWidth = (idx, t, side) => TRACK.runoffWidth(idx, t, side);
+export const closestOnTrack = (x, y) => TRACK.closest(x, y);
+// One nearest-point search, answering distance + surface together.
+export const probeTrack = (x, y) => TRACK.probe(x, y);
 
 // ---------------------------------------------------------------- gates
 
@@ -535,10 +844,19 @@ export function segCross(x1, y1, x2, y2, x3, y3, x4, y4) {
   return t >= 0 && t <= 1 && u >= 0 && u <= 1;
 }
 
-// Crossed the gate in the direction of travel this tick?
+// Crossed the gate in the direction of travel this tick? Used for the
+// START/FINISH line, which is DIRECTIONAL on purpose — see advanceLap.
 export function crossedGate(gate, px, py, x, y) {
   if (!segCross(px, py, x, y, gate.ax, gate.ay, gate.bx, gate.by)) return false;
   return (x - px) * gate.fx + (y - py) * gate.fy > 0;
+}
+
+// Touched the gate at all, in EITHER direction. This is how CHECKPOINTS are
+// tested: a driver who spins, or who has to reverse out of a mistake, can
+// still pick their checkpoint back up on the way through rather than losing
+// the lap for a crossing that happened to be nose-first the wrong way.
+export function crossedGateEither(gate, px, py, x, y) {
+  return segCross(px, py, x, y, gate.ax, gate.ay, gate.bx, gate.by);
 }
 
 // ---- lap tracking (shared by game + bot harness) ----
@@ -552,12 +870,27 @@ export function createLap() {
 // { ticks, valid } when a start-line crossing ended an active lap
 // (valid = all checkpoints hit in order), and `started` is true when a new
 // lap timing run began this tick. Uses the ACTIVE track's gates.
+//
+// THE TWO RULES, and why they are different:
+//
+//   * CHECKPOINTS count in EITHER DIRECTION, but still strictly IN ORDER: only
+//     `CHECKPOINTS[nextCp]` is ever tested. Bidirectional is pure leeway —
+//     spin, reverse out of the grass, cross the gate nose-first backwards, and
+//     the lap survives. It cannot be farmed, because re-crossing a gate you
+//     have already banked is not the gate being tested any more, so no amount
+//     of shuttling back and forth over one gate advances you past it; the only
+//     way to reach checkpoint n+1 is to physically drive to it.
+//   * THE START/FINISH LINE STAYS DIRECTIONAL. It is the gate that ends a lap,
+//     so a bidirectional one would let a car park on the line and saw back and
+//     forth. Reversing back over the line is simply not a crossing, and a lap
+//     that ends without every checkpoint banked is invalid — so the "cross,
+//     reverse, cross again" lap ends immediately and scores nothing.
 export function advanceLap(lap, px, py, x, y) {
   const ev = { finished: null, started: false };
   if (lap.active) {
     lap.ticks++;
     const cp = CHECKPOINTS[lap.nextCp];
-    if (cp && crossedGate(cp, px, py, x, y)) lap.nextCp++;
+    if (cp && crossedGateEither(cp, px, py, x, y)) lap.nextCp++;
   }
   if (crossedGate(START_GATE, px, py, x, y)) {
     if (lap.active) {

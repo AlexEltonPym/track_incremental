@@ -12,7 +12,7 @@
 // There is no baked bot_ghosts.json any more: positions are simulated, never
 // shipped, which is what lets the bots respond to upgrades and to new maps.
 
-import { TICK, G_PX, createCarState, stepCar, slipAngle } from "./physics.js";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js";
 import * as T from "./track.js";
 
 // ---------------------------------------------------------------- PRNG
@@ -610,7 +610,15 @@ export function makeBot(skill, params) {
 
     // ---- pure-pursuit steering toward a look-ahead point ----
     const arcHere = T.CUMLEN[trackIdx];
-    const offRoadNow = T.distToTrack(car.x, car.y) > T.ROAD_HALF;
+    // THE BOTS MEASURE THEMSELVES AGAINST THE ROAD EDGE, NOT THE RUNOFF EDGE.
+    // The concrete skirt makes running wide cheap, which is exactly why a bot
+    // must not treat it as track: a driver who habitually rides the concrete
+    // looks sloppy, and the on-road margin gates in the harness (>= 8 px inside
+    // the road for PRO) would have to be relaxed to let it. So any surface that
+    // is not tarmac counts as "off" here — the bot aims straight back at the
+    // road and stops drifting, exactly as it did when the only alternative to
+    // tarmac was grass.
+    const offRoadNow = T.surfaceAt(car.x, car.y) !== SURFACE.ROAD;
     // Aim-point distance, bounded by geometry rather than by speed. A
     // look-ahead of L across a corner of radius R aims a chord L^2/(8R) inside
     // the centerline, which has to stay on the road — that is where the flat
@@ -867,7 +875,8 @@ export function recordRace(skill, params, opts = {}) {
   const bot = makeBot(skill, params);
   const samples = [[car.x, car.y, car.angle]];     // t=0: parked on the grid
   const blank = () => ({ handbrakeTicks: 0, boostFires: 0, maxTierFired: 0,
-    offRoadTicks: 0, brakeTicks: 0, minSpeed: Infinity, minSpeedFrac: 0 });
+    offRoadTicks: 0, grassTicks: 0, brakeTicks: 0, maxDist: 0,
+    minSpeed: Infinity, minSpeedFrac: 0 });
   const tot = blank();
   const perLap = [];
   let cur = blank();
@@ -876,9 +885,18 @@ export function recordRace(skill, params, opts = {}) {
   let prevBoostTime = 0;
   for (let t = 1; t <= maxTicks; t++) {
     const { inputs, trackIdx } = bot(car);
-    inputs.offRoad = T.distToTrack(car.x, car.y) > T.ROAD_HALF;
+    // One nearest-point search per tick answers both questions: which surface
+    // the physics should charge for, and how far outside the road edge this
+    // race ever got (maxDist — raceBest uses it to throw away strategies that
+    // are only fast because they leave the road).
+    const pr = T.probeTrack(car.x, car.y);
+    inputs.surface = pr.surface;
+    if (pr.dist > tot.maxDist) tot.maxDist = pr.dist;
     if (inputs.handbrake) { tot.handbrakeTicks++; cur.handbrakeTicks++; }
-    if (inputs.offRoad) { tot.offRoadTicks++; cur.offRoadTicks++; }
+    // "Off road" telemetry is measured against the ROAD edge: a tick spent on
+    // the concrete is still a tick spent off the racing surface.
+    if (inputs.surface !== SURFACE.ROAD) { tot.offRoadTicks++; cur.offRoadTicks++; }
+    if (inputs.surface === SURFACE.GRASS) { tot.grassTicks++; cur.grassTicks++; }
     if (inputs.brake > 0) { tot.brakeTicks++; cur.brakeTicks++; }
     // Slowest point of the lap, ignoring the launch (the standing start is
     // trivially the slowest part of lap 1).
@@ -950,17 +968,37 @@ export function planVariants(skill, params) {
 // Race every strategy `skill` has and return the fastest valid recording
 // (annotated with `.plan`, the zones it actually drove). For a bot with no
 // drift plan this is exactly recordRace.
+//
+// ON-ROAD FIRST, THEN FAST. A strategy that is only quick because it carries
+// its slide off the road is not a strategy this game ships: it looks sloppy,
+// it makes the reference ghosts a bad example, and — the concrete reason it is
+// filtered here — it is a CLIFF. Whether an off-road slide "works" flips on a
+// few pixels, so one extra upgrade level could swap a 5.4 s off-road drift for
+// a 6.0 s clean lap and read as an upgrade making the bot slower. Preferring
+// strategies that stay inside the road edge makes the lap time a smooth
+// function of the car again. (Runoff counts as off the road here — the
+// concrete exists to forgive the PLAYER's mistakes, not to widen the bots'
+// racing line.) If nothing stays on the road, the fastest run is still
+// returned, so a bot never simply fails to grid up.
+//
+// "On the road" is measured to the car's CENTRE (that is what distToTrack
+// returns), so the allowance is the car's own half-width: a car whose centre
+// is 6 px outside the edge still has its inside wheels on tarmac and is
+// clipping the edge, not driving beside the track.
+export const CAR_HALF_W = 6;
+
 export function raceBest(skill, params, opts = {}) {
-  let best = null;
+  let best = null, bestOnRoad = null;
   for (const s of planVariants(skill, params)) {
     const r = recordRace(s, params, opts);
-    if (r && (!best || r.totalTicks < best.totalTicks)) {
-      r.plan = s.drift && s.drift.zones ? s.drift.zones : [];
-      r.skill = s;
-      best = r;
-    }
+    if (!r) continue;
+    r.plan = s.drift && s.drift.zones ? s.drift.zones : [];
+    r.skill = s;
+    if (!best || r.totalTicks < best.totalTicks) best = r;
+    if (r.maxDist <= T.ROAD_HALF + CAR_HALF_W &&
+        (!bestOnRoad || r.totalTicks < bestOnRoad.totalTicks)) bestOnRoad = r;
   }
-  return best;
+  return bestOnRoad || best;
 }
 
 // ---------------------------------------------------------------- telemetry
@@ -979,7 +1017,7 @@ export function runBot(skillName, skill, params, opts = {}) {
   const m = {
     skill: skillName,
     attempts: 0, validLaps: 0, lapTicks: [],
-    ticks: 0, offRoadTicks: 0, movingTicks: 0,
+    ticks: 0, offRoadTicks: 0, grassTicks: 0, runoffTicks: 0, movingTicks: 0,
     steerReversals: 0, yawReversals: 0,
     sumYawAcc2: 0, yawAccTicks: 0,
     peakLatG: 0, sumLatG2: 0,
@@ -996,7 +1034,7 @@ export function runBot(skillName, skill, params, opts = {}) {
 
   while (m.attempts < lapsWanted && m.ticks < maxTicks) {
     const { inputs } = bot(car);
-    inputs.offRoad = T.distToTrack(car.x, car.y) > T.ROAD_HALF;
+    inputs.surface = T.surfaceAt(car.x, car.y);
     if (inputs.handbrake) m.handbrakeTicks++;
 
     const px = car.x, py = car.y;
@@ -1007,7 +1045,9 @@ export function runBot(skillName, skill, params, opts = {}) {
 
     const sp = Math.hypot(car.vx, car.vy);
     const atSpeed = sp > 100;
-    if (inputs.offRoad) m.offRoadTicks++;
+    if (inputs.surface !== SURFACE.ROAD) m.offRoadTicks++;
+    if (inputs.surface === SURFACE.RUNOFF) m.runoffTicks++;
+    if (inputs.surface === SURFACE.GRASS) m.grassTicks++;
     if (sp > 30) m.movingTicks++;
 
     // Steering-direction sign reversals (input wobble).
@@ -1078,6 +1118,8 @@ export function runBot(skillName, skill, params, opts = {}) {
   m.bestLap = times.length ? Math.min(...times) : null;
   m.meanLap = times.length ? times.reduce((a, b) => a + b, 0) / times.length : null;
   m.offRoadPct = 100 * m.offRoadTicks / m.ticks;
+  m.grassPct = 100 * m.grassTicks / m.ticks;
+  m.runoffPct = 100 * m.runoffTicks / m.ticks;
   m.steerRevPerS = m.steerReversals / secs;
   m.yawRevPerS = m.yawReversals / secs;
   m.wobble = m.steerRevPerS + m.yawRevPerS;

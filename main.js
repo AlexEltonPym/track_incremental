@@ -3,14 +3,15 @@
 // Physics lives in physics.js, track geometry/lap logic in track.js.
 
 import {
-  TICK, carParams, createCarState, stepCar,
+  TICK, SURFACE, carParams, createCarState, stepCar,
+  UPGRADE_DEFS, upgradeCost,
 } from "./physics.js";
 // track.js exports the ACTIVE track's geometry as ES module live bindings, so
 // these names follow setTrack() with no re-import and no plumbing.
 import * as T from "./track.js";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
-  TRACKS, DEFAULT_TRACK, distToTrack, createLap, advanceLap,
+  TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
 } from "./track.js";
 import { botField } from "./bots.js";
 
@@ -82,33 +83,10 @@ const ctx = canvas.getContext("2d");
 
 // ---------------------------------------------------------------- upgrades
 
-// `drives: true` marks an upgrade that changes how the CAR behaves — the ones
-// the bots inherit (they drive your car) and the ones test/drive_bot.mjs sweeps
-// for the ordering/monotonicity invariants. The economy upgrades below it are
-// deliberately excluded from that regime: they cannot make anyone quicker.
-const UPGRADES = [
-  { id: "speed",  name: "Top Speed",    baseCost: 50, growth: 1.6, drives: true,
-    desc: lvl => `+${lvl * 10}% max speed, +${(lvl * 2.6).toFixed(0)}% brakes` },
-  { id: "accel",  name: "Acceleration", baseCost: 40, growth: 1.6, drives: true,
-    desc: lvl => `+${lvl * 12}% accel, +${lvl * 8}% brakes` },
-  { id: "grip",   name: "Grip",         baseCost: 45, growth: 1.6, drives: true,
-    desc: lvl => `+${lvl} handling` },
-  { id: "boostPwr", name: "Boost Power", baseCost: 90, growth: 1.65, drives: true,
-    desc: lvl => `drift boost +${lvl * 9}% stronger` },
-  { id: "boostDur", name: "Boost Duration", baseCost: 80, growth: 1.65, drives: true,
-    desc: lvl => `drift boost +${lvl * 10}% longer` },
-  { id: "payout", name: "Lap Payout",   baseCost: 60, growth: 1.7,
-    desc: lvl => `x${(1 + lvl * 0.3).toFixed(1)} credits` },
-  // The big income multiplier: every extra ghost replays your best lap on the
-  // same loop and pays the same as the first, so income scales linearly with
-  // the level while the price scales by 7x — buying the third one is a project.
-  { id: "ghosts", name: "Ghost Fleet",  baseCost: 400, growth: 7,
-    desc: lvl => `${lvl + 1} earning ghost${lvl ? "s" : ""} (x${lvl + 1} income)` },
-];
-
-function upgradeCost(u, lvl) {
-  return Math.round(u.baseCost * Math.pow(u.growth, lvl));
-}
+// The shop lives in physics.js (UPGRADE_DEFS) — next to the car it modifies,
+// and where the acceptance harness can price it, because the differentiation
+// gates compare upgrades at EQUAL CREDIT SPEND. Nothing here but the alias.
+const UPGRADES = UPGRADE_DEFS;
 
 // ---------------------------------------------------------------- state
 
@@ -140,7 +118,7 @@ const state = {
   lapRec: [],           // current lap recording
   raceLaps: [],         // valid lap times (ticks) completed in THIS 3-lap race
   raceDone: false,      // 3 laps in the bag — R restarts the race
-  offRoad: false,
+  surface: SURFACE.ROAD, // 0 tarmac / 1 concrete runoff / 2 grass
   totalTicks: 0,
   showBotGhosts: true,  // G toggles the bot reference ghosts
   userZoom: 1,          // scroll-wheel zoom multiplier (1 = default follow zoom)
@@ -392,7 +370,7 @@ function physicsStep() {
   const c = state.car;
   const px = c.x, py = c.y;
 
-  state.offRoad = distToTrack(c.x, c.y) > ROAD_HALF;
+  state.surface = surfaceAt(c.x, c.y);
 
   // Standing start: the player's FIRST touch of any drive control is the
   // "go" signal for the bot ghosts parked alongside on the grid.
@@ -406,7 +384,7 @@ function physicsStep() {
     brake: keys.down ? 1 : 0,
     steer: (keys.right ? 1 : 0) - (keys.left ? 1 : 0),
     handbrake: !!keys.drift,
-    offRoad: state.offRoad,
+    surface: state.surface,
   }, params, TICK);
 
   // ---- camera juice triggers (applied/decayed in updateCamera) ----
@@ -642,6 +620,28 @@ function renderWorld() {
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
 
+  // THE CONCRETE RUNOFF, first: a distinct pale-grey skirt on the outside of
+  // the demanding corners, drawn UNDER the road edge line so the edge still
+  // reads as the boundary of the racing surface. The polygons come straight
+  // from track.js's derived width arrays, so what you see is what the physics
+  // charges you for. A slightly darker rim keeps it from bleeding into the
+  // grass at the taper.
+  if (T.RUNOFF_BANDS.length) {
+    ctx.save();
+    for (const poly of T.RUNOFF_BANDS) {
+      ctx.beginPath();
+      ctx.moveTo(poly[0][0], poly[0][1]);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
+      ctx.closePath();
+      ctx.fillStyle = "#7e8481";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(40,46,44,0.45)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   // Road edges then asphalt.
   tracePath();
   ctx.strokeStyle = "#cfcabb";
@@ -749,7 +749,11 @@ function renderWorld() {
   }
 
   // Player car.
-  drawCar(state.car.x, state.car.y, state.car.angle, 1, state.offRoad ? "#c95f3f" : "#e84d3d");
+  // Player car, tinted by surface: red on tarmac, a shade duller on concrete,
+  // properly washed out in the grass.
+  drawCar(state.car.x, state.car.y, state.car.angle, 1,
+    state.surface === SURFACE.GRASS ? "#c95f3f"
+      : state.surface === SURFACE.RUNOFF ? "#dc5b46" : "#e84d3d");
 }
 
 // Minimap: full track outline + player/ghost dots, top-right corner.
@@ -866,11 +870,16 @@ function render() {
   // Screen-space HUD.
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   renderMinimap();
-  if (state.offRoad) {
-    ctx.fillStyle = "rgba(224,112,111,0.92)";
-    ctx.font = "bold 16px sans-serif";
+  // Surface warning, in two tiers so it never cries wolf. The concrete skirt
+  // is a mild, temporary state — a quiet grey note that you are off the racing
+  // line — while grass keeps the red "you are losing the lap" warning.
+  if (state.surface !== SURFACE.ROAD) {
+    const grass = state.surface === SURFACE.GRASS;
+    ctx.fillStyle = grass ? "rgba(224,112,111,0.92)" : "rgba(198,205,202,0.78)";
+    ctx.font = grass ? "bold 16px sans-serif" : "600 13px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("OFF ROAD — ease back on", CANVAS_W / 2, 34);
+    ctx.fillText(grass ? "OFF ROAD — ease back on" : "runoff — off the racing line",
+      CANVAS_W / 2, 34);
     ctx.textAlign = "left";
   }
   if (state.car.drifting) {

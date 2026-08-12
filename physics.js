@@ -21,16 +21,59 @@ export const ZERO_LEVELS = {
 // The levels a car's HANDLING depends on, in the order the harness sweeps them.
 export const DRIVING_UPGRADES = ["speed", "accel", "grip", "boostPwr", "boostDur"];
 
+// ---------------------------------------------------------------- surfaces
+//
+// THREE surfaces, all of them driveable — this game has no walls and no traps.
+// `stepCar` takes the surface as `inputs.surface`; track.js decides which one
+// the car is standing on (see surfaceAt).
+//
+//   ROAD    tarmac, no penalty.
+//   RUNOFF  the concrete skirt on the outside of demanding corners: a small
+//           speed cap and a light drag, so running wide costs a tenth of a
+//           second rather than a lap. Deliberately FRIENDLY — it exists to
+//           give a casual driver leeway, not to punish them.
+//   GRASS   everything else: ~73% speed cap plus real drag.
+export const SURFACE = { ROAD: 0, RUNOFF: 1, GRASS: 2 };
+
+// Top Speed's effect curve. It used to be a flat +10% per level forever, which
+// made it the biggest lever on two of the three circuits AND the cheapest way
+// to buy lap time anywhere — i.e. always the correct first purchase, which
+// collapses the "different tracks reward different builds" design.
+// It is now a SOFT CAP: each level buys 10% of the REMAINING headroom toward
+// +SPEED_SOFT, so level 1 is still worth ~+10% (nothing early-game changed)
+// while level 12 is worth ~+3%. Combined with the steeper price growth in
+// UPGRADE_DEFS, top speed stays a strong buy on the circuit built for it and
+// stops being the answer to every question. Continuous and strictly
+// increasing, so the bot monotonicity invariants are untouched.
+// Each level buys `rate` of the headroom still left below `soft`. Level 1 is
+// worth almost exactly `rate`; the curve never reaches `soft`, so there is no
+// cliff and no level at which an upgrade stops being an upgrade.
+function diminish(rate, soft, lvl) {
+  return soft * (1 - Math.exp(-rate * lvl / soft));
+}
+const SPEED_SOFT = 0.72;   // asymptotic top-speed bonus (+72%)
+const SPEED_RATE = 0.10;   // marginal bonus per level at Lv 0
+export function speedBonus(lvl) { return diminish(SPEED_RATE, SPEED_SOFT, lvl); }
+// The boost upgrades are the EMBER specialists, so they get the opposite
+// treatment: a fatter marginal rate (14%/level against the old flat 9/10%) on
+// a generous soft cap, and — the part that actually decides value per credit —
+// a far cheaper price curve in UPGRADE_DEFS. The cap is what keeps a Lv 20
+// boost from being a 4-second rocket the bot invariants have to survive.
+export function boostPwrBonus(lvl) { return diminish(0.14, 1.8, lvl); }
+export function boostDurBonus(lvl) { return diminish(0.14, 1.8, lvl); }
+
 export function carParams(levels = ZERO_LEVELS) {
   // Tolerate partial level objects (older saves, harness call sites).
   const l = k => levels[k] || 0;
-  // Braking is bought BY BOTH the acceleration upgrade and, at a third of the
-  // rate, by top speed: a faster car that could not also stop harder would be
-  // a downgrade at every corner on the circuit, and "an upgrade is never a
-  // downgrade" is a hard invariant here (see README, bot invariants).
-  const stopPower = 1 + 0.08 * l("accel") + 0.026 * l("speed");
+  const vBonus = speedBonus(l("speed"));
+  // Braking is bought BY BOTH the acceleration upgrade and, at a quarter of
+  // the rate, by top speed: a faster car that could not also stop harder would
+  // be a downgrade at every corner on the circuit, and "an upgrade is never a
+  // downgrade" is a hard invariant here (see README, bot invariants). It rides
+  // the same soft-capped curve, so brakes stay in proportion to speed.
+  const stopPower = 1 + 0.08 * l("accel") + 0.26 * vBonus;
   return {
-    topSpeed: 280 * (1 + 0.10 * l("speed")),  // px/s
+    topSpeed: 280 * (1 + vBonus),             // px/s
     // Deliberately modest low-end punch: 0 -> 90% of top speed takes ~2.7 s
     // (with rollDrag below), which makes the drift boost worth earning.
     accel:    150 * (1 + 0.12 * l("accel")),  // px/s^2
@@ -125,10 +168,10 @@ export function carParams(levels = ZERO_LEVELS) {
     // (boostDur) scales both tiers' time. Both are genuine driving upgrades:
     // they flow through this state machine, so the bots — who drive your car —
     // get them too, and PRO+ (the only tier that drifts) is the one they move.
-    boostAmt1:     0.28 * (1 + 0.09 * l("boostPwr")),  // tier 1: +28% top speed...
-    boostDur1:     1.1  * (1 + 0.10 * l("boostDur")),  // ...for 1.1 s
-    boostAmt2:     0.45 * (1 + 0.09 * l("boostPwr")),  // tier 2: +45% top speed...
-    boostDur2:     1.7  * (1 + 0.10 * l("boostDur")),  // ...for 1.7 s
+    boostAmt1:     0.28 * (1 + boostPwrBonus(l("boostPwr"))), // tier 1: +28% top speed...
+    boostDur1:     1.1  * (1 + boostDurBonus(l("boostDur"))), // ...for 1.1 s
+    boostAmt2:     0.45 * (1 + boostPwrBonus(l("boostPwr"))), // tier 2: +45% top speed...
+    boostDur2:     1.7  * (1 + boostDurBonus(l("boostDur"))), // ...for 1.7 s
     // Un-upgraded tier-1 length. The bots' drift-zone ANALYSER plans against
     // this rather than against boostDur1, so buying boost duration can never
     // disqualify a corner it used to slide (which would be an upgrade that
@@ -139,15 +182,85 @@ export function carParams(levels = ZERO_LEVELS) {
 
     // Drag and off-road (gentle: grass is slow, not a wall).
     rollDrag:    0.38,    // 1/s
-    offRoadDrag: 1.4,     // 1/s extra while off-road
-    offRoadCap:  0.73,    // top-speed fraction off-road
+    offRoadDrag: 1.4,     // 1/s extra on GRASS
+    offRoadCap:  0.73,    // top-speed fraction on GRASS
     offRoadAccelScale: 1, // no stacked accel penalty
+    // THE CONCRETE RUNOFF SKIRT — the third surface, and deliberately a mild
+    // one. Its steady-state speed is the cap (0.92 x top) rather than the drag
+    // equilibrium (150 / (0.38 + 0.14) = 288 px/s, above the cap at stock), so
+    // running wide onto concrete costs about 8% of your speed and a little
+    // momentum. Grass, for contrast, settles at 150 / (0.38 + 1.4) = 84 px/s.
+    // Between the two, much nearer the road: leeway, not a penalty box.
+    runoffDrag:  0.14,    // 1/s extra on the concrete skirt
+    runoffCap:   0.92,    // top-speed fraction on the concrete skirt
 
     payoutMult: 1 + 0.3 * l("payout"),
 
     // v0 physics emulation for before/after benchmarking (test harness only).
     legacy: false,
   };
+}
+
+// ---------------------------------------------------------------- the shop
+//
+// THE UPGRADE TABLE LIVES HERE, next to the car it modifies, because the
+// acceptance harness has to price upgrades as well as apply them: the
+// differentiation gates compare upgrades at EQUAL CREDIT SPEND (see
+// test/drive_bot.mjs, valuePerCredit), and a price list that lived only in
+// main.js would have made that impossible to measure. main.js imports this
+// and adds nothing but DOM.
+//
+// `drives: true` marks an upgrade that changes how the CAR behaves — the ones
+// the bots inherit and the ones the sweep gates. Lap Payout and Ghost Fleet
+// are economy only.
+//
+// PRICING IS HALF THE BALANCE. Top Speed is universally useful, so it is the
+// most expensive thing in the shop per level (x1.95) on top of its soft-capped
+// effect; the specialists are cheap, so an equal pile of credits buys many more
+// levels of them. That is what makes "which upgrade first" a question about
+// which circuit you are grinding rather than a solved answer.
+export const UPGRADE_DEFS = [
+  { id: "speed", name: "Top Speed", baseCost: 90, growth: 1.95, drives: true,
+    desc: lvl => `+${(100 * speedBonus(lvl)).toFixed(0)}% max speed, ` +
+      `+${(26 * speedBonus(lvl)).toFixed(0)}% brakes` },
+  { id: "accel", name: "Acceleration", baseCost: 40, growth: 1.6, drives: true,
+    desc: lvl => `+${lvl * 12}% accel, +${lvl * 8}% brakes` },
+  { id: "grip", name: "Grip", baseCost: 45, growth: 1.5, drives: true,
+    desc: lvl => `+${lvl} handling` },
+  { id: "boostPwr", name: "Boost Power", baseCost: 25, growth: 1.3, drives: true,
+    desc: lvl => `drift boost +${(100 * boostPwrBonus(lvl)).toFixed(0)}% stronger` },
+  { id: "boostDur", name: "Boost Duration", baseCost: 20, growth: 1.3, drives: true,
+    desc: lvl => `drift boost +${(100 * boostDurBonus(lvl)).toFixed(0)}% longer` },
+  { id: "payout", name: "Lap Payout", baseCost: 60, growth: 1.7,
+    desc: lvl => `x${(1 + lvl * 0.3).toFixed(1)} credits` },
+  // The big income multiplier: every extra ghost replays your best lap on the
+  // same loop and pays the same as the first, so income scales linearly with
+  // the level while the price scales by 7x — buying the third one is a project.
+  { id: "ghosts", name: "Ghost Fleet", baseCost: 400, growth: 7,
+    desc: lvl => `${lvl + 1} earning ghost${lvl ? "s" : ""} (x${lvl + 1} income)` },
+];
+
+export const UPGRADE_BY_ID = Object.fromEntries(UPGRADE_DEFS.map(u => [u.id, u]));
+
+// Price of the NEXT level (going from `lvl` to `lvl + 1`).
+export function upgradeCost(u, lvl) {
+  const def = typeof u === "string" ? UPGRADE_BY_ID[u] : u;
+  return Math.round(def.baseCost * Math.pow(def.growth, lvl));
+}
+
+// How many levels `budget` credits buys from scratch, and what that costs.
+// This is the unit the differentiation gates are measured in: equal credits
+// on the counter, however many levels that happens to be.
+export function levelsForBudget(u, budget) {
+  const def = typeof u === "string" ? UPGRADE_BY_ID[u] : u;
+  let lvl = 0, spent = 0;
+  for (;;) {
+    const next = upgradeCost(def, lvl);
+    if (spent + next > budget) return { levels: lvl, spent };
+    spent += next;
+    lvl++;
+    if (lvl > 200) return { levels: lvl, spent };
+  }
 }
 
 // Legacy (v0) constants for baseline measurement in the test harness.
@@ -191,11 +304,29 @@ export function createCarState(x, y, angle) {
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+// Which surface is the car on, and what does it cost? `inputs.surface` is a
+// SURFACE constant (0 road / 1 runoff / 2 grass); the older boolean
+// `inputs.offRoad` is still honoured and means grass, so any call site that
+// has not been told about the concrete skirt behaves exactly as before.
+// Returns { cap, drag, accel } as multipliers/addends on the car's own values.
+function surfaceOf(inputs, p) {
+  const s = inputs.surface !== undefined && inputs.surface !== null
+    ? inputs.surface : (inputs.offRoad ? SURFACE.GRASS : SURFACE.ROAD);
+  if (s === SURFACE.GRASS) {
+    return { cap: p.offRoadCap, drag: p.offRoadDrag, accel: p.offRoadAccelScale };
+  }
+  if (s === SURFACE.RUNOFF) {
+    return { cap: p.runoffCap ?? 0.92, drag: p.runoffDrag ?? 0.14, accel: 1 };
+  }
+  return { cap: 1, drag: 0, accel: 1 };
+}
+
 // inputs: { throttle: 0..1, brake: 0..1, steer: -1..1 (target),
-//           handbrake: bool, offRoad: bool }
+//           handbrake: bool, surface: 0|1|2 (or legacy offRoad: bool) }
 // Mutates and returns `car`. Deterministic for a fixed dt.
 export function stepCar(car, inputs, p, dt) {
   if (p.legacy) return stepCarLegacy(car, inputs, p, dt);
+  const surf = surfaceOf(inputs, p);
 
   // Forward/lateral speed along the OLD heading, for steering effectiveness
   // and the drift stabilizer.
@@ -288,9 +419,8 @@ export function stepCar(car, inputs, p, dt) {
   // ---- throttle / brake / reverse (+ boost shove) ----
   // Throttle and boost never push past the current cap; overspeed left over
   // when a boost expires bleeds off further down (never snaps).
-  const accelScale = inputs.offRoad ? p.offRoadAccelScale : 1;
-  const cap = p.topSpeed * (1 + (car.boostTime > 0 ? car.boostAmt : 0)) *
-    (inputs.offRoad ? p.offRoadCap : 1);
+  const accelScale = surf.accel;
+  const cap = p.topSpeed * (1 + (car.boostTime > 0 ? car.boostAmt : 0)) * surf.cap;
   if (vf < cap) vf = Math.min(cap, vf + (inputs.throttle || 0) * p.accel * accelScale * dt);
   if (car.boostTime > 0) {
     // THE BRAKE OVERRIDES THE BOOST SHOVE. The shove (880 px/s^2) is more than
@@ -329,9 +459,9 @@ export function stepCar(car, inputs, p, dt) {
   vl *= Math.exp(-p.latGrip * car.grip * dt);
   vf *= Math.exp(-p.rollDrag * dt);
   if (inputs.handbrake) vf *= Math.exp(-p.driftDrag * dt);
-  if (inputs.offRoad) {
-    vf *= Math.exp(-p.offRoadDrag * dt);
-    vl *= Math.exp(-p.offRoadDrag * dt);
+  if (surf.drag > 0) {
+    vf *= Math.exp(-surf.drag * dt);
+    vl *= Math.exp(-surf.drag * dt);
   }
 
   // ---- top speed cap (soft against post-boost overspeed) ----
@@ -356,7 +486,11 @@ function stepCarLegacy(car, inputs, p, dt) {
   let vf = car.vx * fwdX + car.vy * fwdY;
   let vl = -car.vx * fwdY + car.vy * fwdX;
 
-  const accelScale = inputs.offRoad ? p.offRoadAccelScale : 1;
+  // v0 knew only two surfaces; the runoff skirt maps onto its off-road numbers
+  // scaled down, which is all a before/after benchmark needs.
+  const legacySurf = surfaceOf(inputs, p);
+  const off = legacySurf.cap < 1;
+  const accelScale = off ? p.offRoadAccelScale : 1;
   vf += (inputs.throttle || 0) * p.accel * accelScale * dt;
   const brk = inputs.brake || 0;
   if (brk > 0) {
@@ -375,8 +509,8 @@ function stepCarLegacy(car, inputs, p, dt) {
 
   vl *= Math.exp(-p.latGrip * dt);
   vf *= Math.exp(-p.rollDrag * dt);
-  if (inputs.offRoad) { vf *= Math.exp(-p.offRoadDrag * dt); vl *= Math.exp(-p.offRoadDrag * dt); }
-  const cap = p.topSpeed * (inputs.offRoad ? p.offRoadCap : 1);
+  if (off) { vf *= Math.exp(-p.offRoadDrag * dt); vl *= Math.exp(-p.offRoadDrag * dt); }
+  const cap = p.topSpeed * (off ? p.offRoadCap : 1);
   if (vf > cap) vf = cap;
 
   const nfX = Math.cos(car.angle), nfY = Math.sin(car.angle);

@@ -78,7 +78,8 @@ laps on two circuits, reloading, and flipping it back.
 side panel's "Lap" row counts you through `1 / 3`, `2 / 3`, `3 / 3`. Each lap
 must hit every checkpoint gate in order (4 gates on Ember and Longshore, 7 on
 Lantern; skipping one invalidates that lap, which then doesn't count toward the
-race). After three valid laps a race-complete message reports all three lap
+race) — though the gates are generous about *how* you hit them, see
+*[Checkpoints](#checkpoints-bidirectional-wide-and-still-uncuttable)*. After three valid laps a race-complete message reports all three lap
 times and your best; **R** re-grids everyone and starts a fresh race.
 
 Lap 1 is run from the standing start on the grid, so it carries the
@@ -116,8 +117,58 @@ so income is exactly `N x` the single-ghost rate and arrives in evenly spaced
 instalments instead of one lump per lap. They are income and scenery — they
 never collide with anything and never earn you a lap time.
 
-Running wide onto the grass just slows you down (~73% speed cap plus extra
-drag) — checkpoints are the real anti-cheat, not punishment physics.
+### Three surfaces, none of them a trap
+
+There are no walls, no gravel and nothing that stops you. There are **three
+surfaces**, and the middle one is the point:
+
+| | speed you settle at, flat out | what it feels like |
+|---|---|---|
+| **road** (tarmac) | 278 px/s | the racing surface |
+| **runoff** (concrete) | 255 px/s — **92%** | you ran a bit wide. Carry on. |
+| **grass** | 83 px/s — **30%** | you have lost the corner |
+
+Run wide at 270 px/s and a second later you still have **92%** of your speed on
+the concrete against **39%** in the grass. The concrete skirt is leeway: it
+costs a tenth of a second, not the lap. The HUD says so too — grass gets the
+red `OFF ROAD — ease back on`, the concrete gets a quiet grey `runoff — off
+the racing line`, because a warning that fires for a harmless mistake is a
+warning people learn to ignore.
+
+**Where the concrete is** is derived from the track's own geometry, F1-style —
+on the outside of the corners cars actually run wide at, and nowhere else. See
+*[Where the runoff comes from](#where-the-runoff-comes-from)*.
+
+### Checkpoints: bidirectional, wide, and still uncuttable
+
+Every lap must hit every checkpoint gate **in order**. Two rules make that
+forgiving without making it exploitable:
+
+- **Checkpoints count in EITHER direction.** Spin, reverse out of a mistake,
+  cross the gate nose-first backwards — the lap survives. Only the *next*
+  checkpoint is ever tested, so shuttling back and forth over one gate never
+  advances you past it; the only way to reach checkpoint *n+1* is to drive to
+  it.
+- **Checkpoint gates reach well past the road edge** — out to 107 px from the
+  centerline on Ember and 118 px on Lantern, against road half-widths of 38
+  and 42 px. You can be deep in the grass, let alone on the concrete, and
+  still bank the checkpoint. They are widened **asymmetrically**: the outside
+  end (where a car runs wide) grows to 2 road half-widths past the edge, the
+  inside end (where a *cutter* goes) grows to half of one, because the gates
+  exist to make cutting unprofitable.
+- **The start/finish line stays directional.** It is the gate that ends a lap,
+  so reversing back over it is simply not a crossing — and crossing it forward
+  again ends the lap with the checkpoints unbanked, i.e. invalid. There is no
+  "saw across the line" lap.
+
+Cutting is still hopeless, and the harness measures it rather than asserting
+it: it solves for the **shortest possible gate-legal path** on each circuit
+(coordinate descent on where each gate is crossed) and then drives it with an
+absurdly generous cheater — no cornering limit at all, instant direction
+changes, full throttle everywhere, only the surface slowing it down. On Ember
+that path is 1 856 px (79% of the lap) but **entirely on grass**, so the best
+conceivable time on it is **22.0 s** against PRO's real **9.78 s** lap. Same
+story on the other two (33.5 s vs 12.75 s; 21.5 s vs 10.83 s).
 
 ## The three circuits
 
@@ -171,43 +222,157 @@ a right-handed kink and 64–91 px of straight. Nothing is long enough to
 accelerate down and nothing is long enough to bank a drift charge in either, so
 the lap is decided by one thing: how fast the car will go round a corner.
 
-### The proof that they differ
+### The proof that they differ — measured PER CREDIT
 
-`node test/drive_bot.mjs` measures it rather than claiming it. For each track
-it buys **8 levels of one upgrade alone** and reports what that does to PRO+'s
-best flying lap (PRO+ because it is the only tier that drifts, so it is the
-only one through which the boost upgrades can show up at all):
+`node test/drive_bot.mjs` measures it rather than claiming it. The measurement
+used to buy **8 levels of one upgrade alone** and compare lap times, and that
+measurement was half a decision: *levels are not what you spend*. By it, Top
+Speed was the biggest lever on two circuits out of three and looked like a
+design failure. Some of that was a real balance problem (fixed — see *[The Top
+Speed rebalance](#the-top-speed-rebalance)*), and some of it was measuring the
+wrong thing.
+
+So the differentiation gates now give every upgrade **the same pile of
+credits**, let it buy as many levels as that affords, and compare the lap time
+each pile bought — the choice a player is actually making. Three budgets,
+because "which upgrade first" must not depend on being early or late in the
+run. `boost` is that budget split across Boost Power + Boost Duration, since a
+stronger burst that lasts no longer is half a plan.
+
+```
+VALUE PER CREDIT — same credits on each upgrade, % off PRO+'s best flying lap.
+  track      budget            speed          accel           grip       boostPwr       boostDur          boost
+  ember      1200 cr      9.66% (3)      1.97% (6)      5.33% (6)     4.73% (10)     6.31% (11)   11.64% (8+8)*
+  ember      3000 cr     11.44% (5)      1.97% (8)      5.52% (8)     5.33% (13)     7.10% (14) 13.41% (11+12)*
+  ember      8000 cr     12.23% (6)     1.97% (10)     5.72% (11)     5.92% (17)     7.50% (18) 14.00% (14+15)*
+  longshore  1200 cr     16.09% (3)*     0.00% (6)      0.54% (6)     0.00% (10)     0.00% (11)    0.00% (8+8)
+  longshore  3000 cr     16.22% (5)*     0.00% (8)      0.54% (8)     0.00% (13)     0.00% (14)  0.00% (11+12)
+  longshore  8000 cr     16.22% (6)*    0.00% (10)     0.67% (11)     0.00% (17)     0.00% (18)  0.00% (14+15)
+  lantern    1200 cr      0.00% (3)      7.26% (6)     18.32% (6)*    0.00% (10)     0.00% (11)    0.00% (8+8)
+  lantern    3000 cr     -0.17% (5)      8.25% (8)     21.45% (8)*    0.00% (13)     0.00% (14)  0.00% (11+12)
+  lantern    8000 cr     -0.17% (6)     9.24% (10)    23.76% (11)*    0.00% (17)     0.00% (18)  0.00% (14+15)
+            (levels the budget buys in brackets; * = best value on that row)
+```
+
+**Every circuit's specialist is the best thing that circuit's credits can buy,
+at every budget** — and that is nine acceptance gates, not a claim:
+
+- the **boost pair** wins on Ember (11.6 / 13.4 / 14.0% against Top Speed's
+  9.7 / 11.4 / 12.2%);
+- **Top Speed** wins on Longshore (16.1–16.2%, against ~0% for everything
+  else);
+- **Grip** wins on Lantern (18.3–23.8%, against Acceleration's 7.3–9.2% and
+  Top Speed's nothing at all);
+- each specialist pays more on its own circuit than on either other one;
+- Top Speed is **not** the best buy on the drift or the grip circuit — the
+  whole point of the rebalance;
+- ...but it is still a real purchase, not a trap: ≥ 10% on its own circuit,
+  and still the second-best thing to own on Ember, ahead of Grip and
+  Acceleration.
+
+Neither boost upgrade *alone* out-earns Top Speed on Ember (7.1% for Boost
+Duration against 11.4%), and that is deliberate rather than a miss: they are
+two halves of one purchase, and the pair — the way anyone actually buys them —
+beats it comfortably at every budget.
+
+The older per-level table is still printed, because it says something the
+per-credit one hides: what each circuit is physically *sensitive* to, with
+price taken out.
 
 ```
 UPGRADE SENSITIVITY — % off PRO+'s best flying lap for 8 levels of one upgrade, per track.
   track       designed for     base lap     speed     accel      grip  boostPwr  boostDur  drift line
-  ember       Boost / drift       8.45s    14.20%     1.97%     5.52%     3.75%     5.13%       13.6%
+  ember       Boost / drift       8.45s    12.82%     1.97%     5.52%     4.14%     5.33%       13.6%
   longshore   Top speed          12.43s    16.22%     0.00%     0.54%     0.00%     0.00%        2.5%
-  lantern     Grip / precision   10.10s     0.17%     8.25%    21.45%     0.00%     0.00%        6.8%
+  lantern     Grip / precision   10.10s    -0.17%     8.25%    21.45%     0.00%     0.00%        6.8%
 ```
 
-Read the columns:
-
-- **Top Speed** is worth 16.2% on the speedway, 14.2% on Ember and **0.2%** on
-  the coil — a car that never reaches its top speed does not care what it is.
-- **Grip** is worth 21.5% on the coil, 5.5% on Ember and **0.5%** on the
-  speedway — corners that are already flat out cannot be taken faster.
-- **The boost upgrades** are worth 8.9% combined on Ember and **exactly zero**
+- **Grip** is worth 21.5% on the coil and **0.5%** on the speedway — corners
+  that are already flat out cannot be taken faster.
+- **The boost upgrades** are worth 9.5% combined on Ember and **exactly zero**
   anywhere else, because nowhere else has a corner you can bank a charge in.
 - **The drift line itself** (PRO+ against PRO on the same car) is worth 13.6%
   on Ember against 6.8% and 2.5% elsewhere.
 
-Nine acceptance gates assert this shape, so a future geometry tweak that
-flattens the differences fails the suite: Top Speed must be the biggest lever
-on the speedway *and* bigger there than anywhere else; Grip likewise on the
-coil; Grip must beat Top Speed on the coil and lose to it on the speedway; the
-boost upgrades must pay ≥ 3% on Ember, ≥ 3x more there than anywhere else, and
-more than Grip does there; and the drift line must pay most on Ember.
+### The Top Speed rebalance
 
-Top Speed remains a strong lever on two of the three circuits, and that is
-honest rather than a bug: it is the universal upgrade. What makes the tracks
-different is *which other* upgrade is worth buying alongside it — and on the
-coil, top speed is worth nothing at all.
+Top Speed used to be a flat **+10% per level, forever**, at the same x1.6 price
+growth as almost everything else. Measured per level it was the biggest lever
+on *every* circuit — 14.2% on the drift track, 16.2% on the speedway — and it
+was useful everywhere, so there was never a reason to buy anything else first.
+That kills the premise that different tracks reward different builds.
+
+Three changes, all of them in `physics.js`:
+
+1. **Diminishing returns with a soft cap.** Each level now buys 10% of the
+   *remaining headroom* toward +72%: `speedBonus(l) = 0.72 * (1 - e^(-0.10 l /
+   0.72))`. Level 1 is still worth ~+10%, so nothing about the early game
+   changed; level 8 is worth +48% instead of +80%, and level 20 is +67%
+   instead of +200%. The curve is continuous and strictly increasing, so the
+   bots' monotonicity invariant is untouched — and a Lv 20 car doing 468 px/s
+   instead of 840 px/s is a car the corner planners can still drive.
+2. **A steeper price.** x1.95 per level against x1.6 for Acceleration and x1.5
+   for Grip, from a base of 90 cr — the priciest thing in the shop, because it
+   is the one upgrade that is useful everywhere.
+3. **Cheaper, stronger specialists.** Boost Power and Boost Duration were
+   90 / 80 cr at x1.65 for +9% / +10% a level; they are now **25 / 20 cr at
+   x1.30** for a soft-capped +14% a level. 3 000 credits used to buy six levels
+   of Boost Power; it now buys thirteen. Grip's growth dropped x1.6 → x1.5.
+
+Brakes still ride the speed curve (+26% of whatever the speed bonus is), so a
+faster car can still stop: the "an upgrade is never a downgrade" invariant that
+rule exists for is unchanged.
+
+The result is the table above. Top Speed is still a strong, obvious buy, it
+still wins outright on the circuit built for it, and it is no longer the
+correct first purchase everywhere.
+
+### Where the runoff comes from
+
+The concrete skirt is **derived from the geometry**, not hand-placed per
+circuit — there is not one runoff coordinate in any track definition, and a
+fourth circuit gets its concrete for free. `buildTrack()` does this
+(`RUNOFF_TUNING` holds every constant):
+
+1. **Find the corners.** Maximal runs of same-sign curvature whose radius drops
+   below 8 road half-widths, with hysteresis — the same test the drift-zone
+   analyser uses, so both agree on where the corners are.
+2. **Throw out the kinks.** A run only counts if it actually changes direction
+   by ≥ 25°. That is what stops Lantern's 9–19° linking kinks from collecting a
+   skirt and turning "runoff at the corners" into "runoff everywhere".
+3. **Price the corner's demand.** How fast a *reference* car (a fixed lateral
+   budget and a fixed reference top speed — not the player's current car; the
+   concrete is not re-poured when someone goes shopping) carries through it, as
+   a fraction of that top speed. Longshore's radius-251 sweepers come out at
+   **0.98**, Ember's loops at **0.74**, Lantern's lobes at **0.63–0.72**.
+4. **Width follows demand**, 0.45 → 1.30 road half-widths across the range, so
+   a corner you take at 98% of top speed gets 48 px of concrete and one you
+   take at 63% gets 25 px. Exactly the way a real circuit is built: the
+   quicker the corner, the further the car goes when it lets go.
+5. **Place it on the OUTSIDE, from the apex to past the exit.** The curvature's
+   *sign* says which side the car runs out to. The band starts 35% into the
+   corner (cars run wide from the apex onwards) and continues for another 40%
+   of the corner's length past its end — the corner exit is the classic place
+   to find a car on the concrete — with a taper at each end so the surface
+   never starts with a step.
+6. **Bridge short gaps.** Two skirts less than 3 road half-widths apart are one
+   skirt, so Longshore's double-apex corners (two 45° arcs with a 70 px link)
+   get one continuous slab instead of two with a metre of grass between them.
+
+What that produces:
+
+| circuit | lap with concrete on one side | skirts | where, and how wide |
+|---|---|---|---|
+| **EMBER** | 46% | 3 | both 158° loops (31 px each) and the last kink (42 px) |
+| **LONGSHORE** | 55% | 4 | the outside of all four double-apex corners, 48 px — the widest on any circuit, because they are the fastest |
+| **LANTERN** | 51% | 7 | the outside of all seven lobes, 25–32 px, widest at the fastest (turn 1) |
+
+The straights stay bare: Ember's longest unbroken stretch with no concrete at
+all is 27% of the lap, Longshore's 16%, and on the coil — which has no straight
+longer than 91 px — 7%. Three acceptance gates check this from the width
+arrays themselves rather than from the derivation: every skirt must peak at a
+real corner, must sit on the *outside* of it, and at least a quarter of the lap
+must have no concrete anywhere.
 
 ### Designing a fourth track
 
@@ -353,6 +518,22 @@ one (~50 ms) buys a hard guarantee: PRO+'s lap time is a minimum over a set
 that always contains its clean line, so a drift plan that stops paying on some
 exotic spec costs nothing at all.
 
+**On the road first, then fast.** The fastest strategy only counts if it stayed
+inside the road edge — measured to the car's centre, with its own half-width
+(6 px) as the allowance, so clipping the kerb is fine and driving beside the
+track is not. **Runoff counts as off the road here**: the concrete exists to
+forgive the *player's* mistakes, not to widen the bots' racing line, and a
+reference ghost that habitually rides the skirt is a bad example as well as a
+worse lap. If nothing stays on the road the fastest run is still returned, so a
+bot never simply fails to grid up.
+
+That filter is not decoration. Whether an off-road slide "works" turns on a few
+pixels, so without it one extra upgrade level could swap a 5.4 s off-road drift
+for a 6.0 s clean lap and read as *an upgrade making the bot slower*: five of
+the monotonicity violations that appeared while rebalancing Top Speed were
+exactly this, and preferring on-road strategies removed all five by making lap
+time a smooth function of the car again.
+
 ### Bots on an upgraded car — the invariants
 
 Because the bots mirror your spec, the controller has to work across the whole
@@ -435,7 +616,7 @@ boost shove (physics.js), it threw away the burst it had just earned one tick
 after it arrived. Boost Power measured as worth **0.00%** on every track. The
 cap the controller drives at is now the *boosted* one while a burst is lit
 (corner limits are untouched — a boosting car still slows for the next corner),
-after which Boost Power/Duration are worth 8.9% a lap on the drift circuit.
+after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
 
 ## Code layout
 
@@ -459,6 +640,17 @@ after which Boost Power/Duration are worth 8.9% a lap on the drift circuit.
   earning; the boost charge/fire state machine (charge requires genuine
   cornering and decays 2.5x faster than it builds when conditions drop) and
   the brake-stop/reverse gate live in the car state (fully deterministic).
+  **Three surfaces**, taken as `inputs.surface` (0 road / 1 concrete runoff /
+  2 grass; the old boolean `offRoad` is still honoured and means grass): each
+  is a speed-cap multiplier plus an extra drag term, so adding a fourth would
+  be two numbers. Also home to **the shop** — `UPGRADE_DEFS`, `upgradeCost()`
+  and `levelsForBudget()` — because the acceptance harness has to *price*
+  upgrades as well as apply them, and a price list that lived only in `main.js`
+  would have made the value-per-credit gates impossible to measure. `main.js`
+  imports it and adds nothing but DOM. The Top Speed / Boost Power / Boost
+  Duration effect curves (`speedBonus`, `boostPwrBonus`, `boostDurBonus`) are
+  soft caps rather than straight lines — see *[The Top Speed
+  rebalance](#the-top-speed-rebalance)*.
 - `track.js` — **the multi-track module**: three track *definitions* plus the
   builder that turns one into everything the game and the bots need. No DOM.
   - A definition is a closed path of straights and arcs
@@ -474,6 +666,20 @@ after which Boost Power/Duration are worth 8.9% a lap on the drift circuit.
     grid behind `distToTrack`, and a `TRACK_SIGNATURE` that includes the
     track's id — which is what makes the bot-field cache in `bots.js` key
     correctly per circuit.
+  - ...and **the concrete runoff**, derived from the same curvature data:
+    two per-centerline-point width arrays (one per side), the renderable band
+    polygons `main.js` fills, and `surfaceAt(x, y)` / `probe(x, y)`, which
+    answer "where am I and what am I standing on" in a single nearest-point
+    search — this is the hottest function in the whole simulation, so
+    `distToTrack` is a thin wrapper over the same call and the two can never
+    disagree about where the edge of the road is. See *[Where the runoff comes
+    from](#where-the-runoff-comes-from)*.
+  - **The gate rules** live here too: `crossedGate` (directional, used for the
+    start/finish line only), `crossedGateEither` (used for checkpoints) and
+    `advanceLap`, which tests only the *next* checkpoint so bidirectional
+    crossings cannot be farmed. Checkpoint gates are widened asymmetrically at
+    build time — far on the outside of the corner, barely at all on the
+    inside.
   - **One track is active at a time**, and the module-level exports (`CENTER`,
     `N`, `ROAD_HALF`, `CHECKPOINTS`, `START_GATE`, `TRACK_SIGNATURE`, …) are
     ES module **live bindings** onto it, with the query functions
@@ -485,8 +691,12 @@ after which Boost Power/Duration are worth 8.9% a lap on the drift circuit.
 - `main.js` — game glue: input, rotating follow camera (forward-is-up,
   smoothed rotation lag, big velocity look-ahead, speed-scaled zoom
   ~1.7x-1.45x, subtle drift kick + boost pulse), north-up corner minimap,
-  tier-colored tire marks, boost flames, HUD (including the `Lap n / 3` race
-  counter and the race-complete summary), the **track selector** and
+  tier-colored tire marks, boost flames, the **concrete runoff bands** (filled
+  from `track.js`'s derived polygons, drawn *under* the road edge line so the
+  edge still reads as the boundary of the racing surface; the minimap
+  deliberately shows the road only, since at ~0.05x scale a 30 px skirt is
+  noise), HUD (including the `Lap n / 3` race counter, the two-tier surface
+  warning and the race-complete summary), the **track selector** and
   `switchTrack()` (swap the geometry, re-fit the minimap, re-simulate the
   field, re-grid), the **per-track state** (`state.tracks[id] = { bestTicks,
   ghostRec, ghostIndex }` — best lap, earning-ghost recording and playhead all
@@ -504,7 +714,8 @@ after which Boost Power/Duration are worth 8.9% a lap on the drift circuit.
   cap; `deriveDriftZones()` + `findCorners()`, the automatic corner analysis
   that replaces PRO+'s hand-written drift zones (tunable via the
   `DRIFT_TUNING` object); `planVariants()` / `raceBest()`, which race a drift
-  plan against the clean line and keep the quicker; the telemetry lap runner;
+  plan against the clean line and keep the quicker *of those that stayed on
+  the road*; the telemetry lap runner;
   and
   `recordRace(skill, params, {laps})` — the 3-lap race recorder that drives
   from rest at the grid through three consecutive laps, samples every tick,
@@ -540,7 +751,7 @@ best/mean lap, % ticks off-road, wobble index (steering-direction reversals +
 yaw-rate zero-crossings per second), peak/RMS lateral g and traction-circle
 utilization (assumed scale: 10 px = 1 m).
 
-Beyond the bot laps, the suite runs five scripted feature tests:
+Beyond the bot laps, the suite runs six scripted feature tests:
 
 - **drift boost** — drive to speed, hold a 1 s handbrake drift, release,
   floor it: must bank tier 1, peak ≥ +25% over top speed, and settle to
@@ -557,13 +768,18 @@ Beyond the bot laps, the suite runs five scripted feature tests:
   boost may fire on release
 - **brake gate** — from top speed, hold brake: must reach a full stop and
   hold it ≥ 0.3 s before reverse engages
+- **the three surfaces** — flat out for 6 s on each: the concrete runoff must
+  settle strictly between road and grass, at ≥ 85% of road speed (it is at
+  92%), grass must stay under 45% (it is at 30%), and running wide onto the
+  concrete at speed must cost under 10% in the first second
 
 Design gates lock in the v5 balance and fail loudly if a future change undoes
 it. **Everything below the scripted physics tests runs on all three tracks**
 (the physics scripts are track-independent, so they run once), against the
-*shipped* 3-lap race recordings. The suite is **82 checks in ~32 s** and prints
-a per-track bot table, a per-track summary, three sweep tables and the
-upgrade-sensitivity table.
+*shipped* 3-lap race recordings. The suite is **120 checks in ~44 s** and
+prints a per-track bot table, a per-track summary, the per-track runoff and
+cutting report, three sweep tables, the upgrade-sensitivity table and the
+value-per-credit table.
 
 - **casual-friendly everywhere** — on every circuit the timid keyboard NOVICE
   must complete ≥ 8/10 valid laps with < 6% of its ticks off-road and a wobble
@@ -579,8 +795,30 @@ upgrade-sensitivity table.
   and the coil no corner is long enough to bank a charge in, so demanding a
   drift there would be demanding the wrong thing: the gate becomes "PRO+ still
   leads *without* needing a boost to do it"
-- **the tracks reward different upgrades** — the nine differentiation gates
-  described under *[The three circuits](#the-three-circuits)*
+- **the tracks reward different upgrades, per credit** — the nine
+  value-per-credit gates described under *[The proof that they
+  differ](#the-proof-that-they-differ--measured-per-credit)*, plus four
+  per-level sensitivity gates that survive from the old set (Grip must beat Top
+  Speed on the coil and lose to it on the speedway; the boost upgrades must pay
+  ≥ 3% on Ember and ≥ 3x more there than anywhere else; the drift line must pay
+  most on Ember)
+- **the gate rules** — six gates per circuit: a lap with one checkpoint taken
+  *backwards* is valid; the checkpoint gates reach well past the road edge
+  (and a crossing at their far tip, off the racing surface, registers); and
+  three exploit regressions — shuttling over one gate never advances past it,
+  reversing back over the finish line and re-crossing it scores an *invalid*
+  lap, and taking the checkpoints in reverse order does not validate a lap
+- **cutting cannot pay** — on every circuit, the *shortest gate-legal path*
+  (solved by coordinate descent over where each gate is crossed) driven by a
+  cheater with no cornering limit at all must still be slower than PRO's real
+  clean lap. Measured: 22.0 s vs 9.78 s, 33.5 s vs 12.75 s, 21.5 s vs 10.83 s
+- **the runoff is at the corners** — checked from the derived width arrays,
+  not from the derivation: every skirt must peak at a real corner and sit on
+  the *outside* of it, at least a quarter of the lap must have no concrete at
+  all, and each circuit must have some (≥ 10% of the lap)
+- **the concrete makes it gentler, never harsher** — the NOVICE bot must never
+  reach the grass at all on any circuit (it does not: 0.00% off-road
+  everywhere, which the concrete can only improve on)
 - **a race is three laps** — every reference bot must string three *valid*
   laps together (all checkpoints, in order, every lap) on every track
 - **flying laps are real** — every bot's best flying lap must beat its own
@@ -620,7 +858,7 @@ upgrade-sensitivity table.
 
 - **Three hand-authored circuits**, each defined as a path of straights and
   arcs and built into a Catmull-Rom centerline + gates + sectors + collision
-  grid at load, with soft off-road slowdown (no hard walls) and a live-binding
+  grid at load, with three friendly surfaces (no hard walls) and a live-binding
   "active track" so switching is one `setTrack()` call:
   **EMBER LOOP** (2 344 px, two slideable 160° loops each onto a long straight
   — the boost track), **LONGSHORE SPEEDWAY** (3 473 px, long straights and four
@@ -673,7 +911,14 @@ upgrade-sensitivity table.
   spring-return kick on drift start, a slip-proportional see-through-the-
   corner bias, and a brief zoom-out pulse when a boost fires. North-up
   corner minimap with a heading arrow (track outline, player and ghost)
-- Lap validation via ordered checkpoint gates + directional line crossing
+- **Three surfaces, all driveable**: tarmac, a **concrete runoff skirt**
+  derived from track curvature and placed F1-style on the outside of the
+  demanding corners (92% of road speed — leeway, not a penalty), and grass
+  (30%). No gravel, no traps, no walls
+- Lap validation via **bidirectional but strictly ordered** checkpoint gates
+  that reach far past the road edge on the outside of the corner and barely at
+  all on the inside, plus a **directional** start/finish line so a lap can
+  never be completed by reversing over it
 - Ghost recording/playback (per-tick position + angle samples), per track
 - Economy: **your own valid lap pays too** (2.5x what one ghost loop of the
   same lap length pays, flashed in the panel the moment you cross the line),
@@ -683,11 +928,14 @@ upgrade-sensitivity table.
 - **7 upgrades** with geometric cost growth, applied to the player car (and
   therefore to the bots) instantly; the ghost keeps replaying the old
   recording until you beat it:
-  - *driving* — **Top Speed** (50 cr, x1.6/lvl: +10% top speed and +2.6%
-    brakes), **Acceleration** (40 cr, x1.6: +12% accel, +8% brakes), **Grip**
-    (45 cr, x1.6: +1 handling), **Boost Power** (90 cr, x1.65: +9% to both
-    drift-boost tiers speed bonus, so tier 1 goes +28% -> +53% at Lv 10),
-    **Boost Duration** (80 cr, x1.65: +10% boost time, 1.1 s -> 2.2 s at Lv 10)
+  - *driving* — **Top Speed** (90 cr, **x1.95/lvl**: a soft-capped top-speed
+    bonus, +10% at Lv 1 rising to +48% at Lv 8 and +67% at Lv 20, plus 26% of
+    that again in brakes — deliberately the priciest and the only one with
+    diminishing returns, because it is the only one that helps everywhere),
+    **Acceleration** (40 cr, x1.6: +12% accel, +8% brakes), **Grip** (45 cr,
+    x1.5: +1 handling), **Boost Power** (25 cr, **x1.3**: soft-capped +14%/lvl
+    to both drift-boost tiers, so tier 1 goes +28% -> +55% at Lv 8), **Boost
+    Duration** (20 cr, **x1.3**: soft-capped +14%/lvl of boost time)
   - *economy* — **Lap Payout** (60 cr, x1.7: x1.3 credits/level) and **Ghost
     Fleet** (400 cr, **x7/lvl**: +1 earning ghost, i.e. a straight income
     multiplier; the extra ghosts are staggered evenly around the lap)
@@ -695,9 +943,11 @@ upgrade-sensitivity table.
   best times and ghost recordings**, bot-ghost visibility) — save key v5,
   **currently DISABLED behind `const PERSISTENCE = false` for prototyping**: a
   refresh resets everything and any `trackcrimental_*` key is cleared at boot
-- Headless bot-driver harness with F1-style telemetry, **82 acceptance gates
-  (~32 s)** covering all three circuits, scripted drift-boost / drift-control /
-  exploit-regression / brake-gate feature tests, per-track upgrade-space sweeps
-  asserting bot ordering and per-upgrade monotonicity over ~370 simulated car
-  specs, and an upgrade-sensitivity table that *measures* the three tracks
-  rewarding three different upgrades
+- Headless bot-driver harness with F1-style telemetry, **120 acceptance gates
+  (~44 s)** covering all three circuits: scripted drift-boost / drift-control /
+  exploit-regression / brake-gate / three-surface feature tests, per-circuit
+  gate-rule and cut-the-corner regressions, runoff placement checked from the
+  derived width arrays, per-track upgrade-space sweeps asserting bot ordering
+  and per-upgrade monotonicity over ~370 simulated car specs, and a
+  **value-per-credit** table that *measures* each circuit rewarding a different
+  upgrade for the same money

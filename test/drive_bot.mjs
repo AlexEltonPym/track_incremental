@@ -17,8 +17,8 @@
 // Telemetry unit assumption: 10 px = 1 m, so 98.1 px/s^2 = 1 g.
 
 import {
-  TICK, G_PX, carParams, legacyParams, createCarState, stepCar, slipAngle,
-  ZERO_LEVELS, DRIVING_UPGRADES,
+  TICK, G_PX, SURFACE, carParams, legacyParams, createCarState, stepCar, slipAngle,
+  ZERO_LEVELS, DRIVING_UPGRADES, UPGRADE_BY_ID, levelsForBudget,
 } from "../physics.js";
 import {
   SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
@@ -168,6 +168,127 @@ function brakeGateTest(p) {
   return { entry, tStop, tRev, hold: tStop !== null && tRev !== null ? tRev - tStop : null };
 }
 
+// Three surfaces: drive flat out on each for 6 s from rest and see what the
+// car settles at. The point of the check is the ORDER and the SPACING — the
+// concrete skirt has to be a nudge, not a punishment, and grass has to stay
+// the thing you genuinely do not want to be on.
+function surfaceTest(p) {
+  const run = surface => {
+    const car = createCarState(0, 0, 0);
+    for (let i = 0; i < n(6); i++) stepCar(car, { throttle: 1, surface }, p, TICK);
+    return Math.hypot(car.vx, car.vy);
+  };
+  // Entering each surface AT SPEED and coasting: how much does it scrub off?
+  const enter = surface => {
+    const car = createCarState(0, 0, 0);
+    for (let i = 0; i < n(6); i++) stepCar(car, { throttle: 1 }, p, TICK);
+    const before = Math.hypot(car.vx, car.vy);
+    for (let i = 0; i < n(1.0); i++) stepCar(car, { throttle: 1, surface }, p, TICK);
+    return Math.hypot(car.vx, car.vy) / before;
+  };
+  return {
+    road: run(SURFACE.ROAD), runoff: run(SURFACE.RUNOFF), grass: run(SURFACE.GRASS),
+    keepRunoff: enter(SURFACE.RUNOFF), keepGrass: enter(SURFACE.GRASS),
+  };
+}
+
+// Sustained speed on a surface: the lower of that surface's speed cap and the
+// speed at which full throttle balances drag. Used by the cut test below as a
+// deliberately GENEROUS model of a cheater (no cornering limit at all, instant
+// direction changes, no time lost accelerating).
+function sustainedSpeed(p, surface) {
+  const cap = surface === SURFACE.GRASS ? p.offRoadCap
+    : surface === SURFACE.RUNOFF ? p.runoffCap : 1;
+  const drag = p.rollDrag + (surface === SURFACE.GRASS ? p.offRoadDrag
+    : surface === SURFACE.RUNOFF ? p.runoffDrag : 0);
+  return Math.min(p.topSpeed * cap, p.accel / drag);
+}
+
+// ------------------------------------------------ checkpoints and cutting
+//
+// A synthetic crossing of `gate` at parameter u along it (0 = the a end,
+// 1 = the b end), travelling in the gate's forward direction (sign +1) or
+// against it (-1). Returns [px, py, x, y] for advanceLap.
+function crossAt(gate, u, sign, d = 8) {
+  const x = gate.ax + (gate.bx - gate.ax) * u;
+  const y = gate.ay + (gate.by - gate.ay) * u;
+  return [x - sign * gate.fx * d, y - sign * gate.fy * d,
+    x + sign * gate.fx * d, y + sign * gate.fy * d];
+}
+
+// The parameter of the gate's WIDER (outside-of-the-corner) tip, just inside
+// the very end of the line.
+function outerU(gate) {
+  const wa = Math.hypot(gate.ax - gate.x, gate.ay - gate.y);
+  const wb = Math.hypot(gate.bx - gate.x, gate.by - gate.y);
+  return wa >= wb ? 0.04 : 0.96;
+}
+
+// THE SHORTEST GATE-LEGAL PATH. Coordinate descent on where each gate is
+// crossed, minimising the total length of the closed polyline through
+// START -> cp1 -> ... -> cpN -> START. Any cut that keeps a lap valid is at
+// least this long, so if THIS path cannot beat the clean lap, nothing can.
+function cheatPath() {
+  const gates = [T.START_GATE, ...T.CHECKPOINTS];
+  const m = gates.length;
+  const u = new Array(m).fill(0.5);
+  const P = i => {
+    const g = gates[i];
+    return [g.ax + (g.bx - g.ax) * u[i], g.ay + (g.by - g.ay) * u[i]];
+  };
+  for (let iter = 0; iter < 40; iter++) {
+    for (let i = 0; i < m; i++) {
+      const a = P((i - 1 + m) % m), b = P((i + 1) % m);
+      let bestU = u[i], bestD = Infinity;
+      for (let k = 0; k <= 200; k++) {
+        u[i] = k / 200;
+        const q = P(i);
+        const d = Math.hypot(q[0] - a[0], q[1] - a[1]) +
+          Math.hypot(b[0] - q[0], b[1] - q[1]);
+        if (d < bestD) { bestD = d; bestU = k / 200; }
+      }
+      u[i] = bestU;
+    }
+  }
+  return gates.map((g, i) => P(i));
+}
+
+// Walk a closed polyline in ~2 px steps: is it a valid lap, how long is it,
+// and how long would the most generous possible cheater take to drive it?
+function walkPath(poly, p) {
+  const pts = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const steps = Math.max(1, Math.ceil(L / 2));
+    for (let k = 0; k < steps; k++) {
+      pts.push([a[0] + (b[0] - a[0]) * k / steps, a[1] + (b[1] - a[1]) * k / steps]);
+    }
+  }
+  let len = 0, secs = 0;
+  const onSurface = [0, 0, 0];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const ds = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const s = T.surfaceAt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    onSurface[s] += ds;
+    len += ds;
+    secs += ds / sustainedSpeed(p, s);
+  }
+  // Two laps of the polyline through the real gate logic: the first crossing
+  // of the start line arms the lap, the second completes it.
+  const lap = T.createLap();
+  let finished = null;
+  for (let pass = 0; pass < 2 && !finished; pass++) {
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const ev = T.advanceLap(lap, a[0], a[1], b[0], b[1]);
+      if (ev.finished) { finished = ev.finished; break; }
+    }
+  }
+  return { len, secs, onSurface, valid: !!(finished && finished.valid) };
+}
+
 // ---------------------------------------------------------------- reporting
 
 const f = (v, d = 2) => v === null || v === undefined ? "  –  " : v.toFixed(d);
@@ -178,7 +299,8 @@ function printRun(m, perLap = true) {
   if (perLap && m.lapTimes.length) {
     console.log(`    laps: ${m.lapTimes.map(t => t.toFixed(2)).join("  ")}`);
   }
-  console.log(`    off-road ${f(m.offRoadPct, 1)}%  |  wobble ${f(m.wobble)}/s` +
+  console.log(`    off-road ${f(m.offRoadPct, 1)}% (concrete ${f(m.runoffPct, 1)}%,` +
+    ` grass ${f(m.grassPct, 1)}%)  |  wobble ${f(m.wobble)}/s` +
     ` (steer ${f(m.steerRevPerS)}, yaw ${f(m.yawRevPerS)})` +
     `  |  yaw-acc rms ${f(m.rmsYawAcc, 1)} rad/s^2`);
   console.log(`    lat g: peak ${f(m.peakLatG)}  rms ${f(m.rmsLatG)}` +
@@ -400,6 +522,73 @@ function sensitivity(tracks) {
 }
 
 
+// ------------------------------------------------ VALUE PER CREDIT
+//
+// THE DIFFERENTIATION MEASUREMENT. The old version of this bought EIGHT LEVELS
+// of each upgrade and compared the lap time that bought — which is not a
+// decision any player ever faces, because levels are not what you spend. Top
+// Speed measured as the biggest lever on two circuits out of three and looked
+// like a design failure; what it actually was, in part, was a measurement that
+// ignored half the decision.
+//
+// So: give every upgrade THE SAME PILE OF CREDITS, let it buy as many levels
+// as that affords, and compare the lap time each pile bought. That is the
+// choice the player is really making, and it is what the gates below assert.
+// Several budgets, because "which upgrade first" must not depend on being
+// early or late in the run.
+const VPC_BUDGETS = [1200, 3000, 8000];
+
+function valuePerCredit(tracks) {
+  const t0 = Date.now();
+  const table = {};
+  for (const id of tracks) {
+    T.setTrack(id);
+    const lapOf = levels => {
+      const r = raceBest(SKILLS.proplus, carParams(levels), { laps: 3 });
+      return r ? r.bestFlyingTicks * TICK : null;
+    };
+    const base = lapOf(ZERO_LEVELS);
+    const rows = {};
+    for (const B of VPC_BUDGETS) {
+      const row = {};
+      for (const u of DRIVING_UPGRADES) {
+        const { levels, spent } = levelsForBudget(u, B);
+        const lap = lapOf({ ...ZERO_LEVELS, [u]: levels });
+        row[u] = { levels, spent, gain: 100 * (base - lap) / base };
+      }
+      // ...plus the pair of boost upgrades, splitting the same budget between
+      // them. Boost Power and Boost Duration are two halves of one purchase —
+      // a stronger burst that lasts no longer, or a longer burst that is no
+      // stronger, is half a plan — so the fair comparison against a single
+      // upgrade's pile of credits is the pile split across the pair.
+      const a = levelsForBudget("boostPwr", B / 2);
+      const b = levelsForBudget("boostDur", B / 2);
+      const lap = lapOf({ ...ZERO_LEVELS, boostPwr: a.levels, boostDur: b.levels });
+      row.boost = { levels: `${a.levels}+${b.levels}`, spent: a.spent + b.spent,
+        gain: 100 * (base - lap) / base };
+      rows[B] = row;
+    }
+    table[id] = { base, rows };
+  }
+  const cols = [...DRIVING_UPGRADES, "boost"];
+  console.log("\nVALUE PER CREDIT — same credits on each upgrade, % off PRO+'s best flying lap.");
+  console.log("  (levels the budget buys in brackets; 'boost' = the budget split across " +
+    "Boost Power + Boost Duration)");
+  console.log("  " + pad("track", 11) + pad("budget", 8) +
+    cols.map(u => padL(u, 15)).join(""));
+  for (const id of tracks) {
+    for (const B of VPC_BUDGETS) {
+      const row = table[id].rows[B];
+      const best = cols.reduce((x, u) => row[u].gain > row[x].gain ? u : x, cols[0]);
+      console.log("  " + pad(id, 11) + pad(B + " cr", 8) +
+        cols.map(u => padL(`${row[u].gain.toFixed(2)}% (${row[u].levels})` +
+          (u === best ? "*" : " "), 15)).join(""));
+    }
+  }
+  console.log(`  ${((Date.now() - t0) / 1000).toFixed(1)}s   (* = best value on that row)`);
+  return table;
+}
+
 // ------------------------------------------------ per-track expectations
 //
 // The gates that are ABOUT THE CIRCUIT rather than about the physics. Every
@@ -449,6 +638,7 @@ function physicsChecks() {
   const xs = exploitStraightTest(p);
   const xp = exploitStopTest(p);
   const bg = brakeGateTest(p);
+  const sf = surfaceTest(p);
   console.log(`\nDrift-boost script: 1.0s drift -> charge ${db.charge.toFixed(2)}s` +
     ` (tier ${db.tierBanked}, max slip ${(db.maxSlip * 180 / Math.PI).toFixed(0)} deg),` +
     ` release peak ${db.peak.toFixed(0)} px/s (top ${db.topSpeed}),` +
@@ -466,6 +656,12 @@ function physicsChecks() {
   console.log(`Brake-gate script: from ${bg.entry.toFixed(0)} px/s, stop at` +
     ` ${bg.tStop === null ? "never" : bg.tStop.toFixed(2) + "s"}, held stopped` +
     ` ${bg.hold === null ? "n/a" : bg.hold.toFixed(2) + "s"} before reverse`);
+  console.log(`Surface script: flat-out settled speed  road ${sf.road.toFixed(0)}` +
+    `  runoff ${sf.runoff.toFixed(0)} (${(100 * sf.runoff / sf.road).toFixed(0)}% of road)` +
+    `  grass ${sf.grass.toFixed(0)} (${(100 * sf.grass / sf.road).toFixed(0)}%)` +
+    `  |  1 s after running wide at speed you keep` +
+    ` ${(100 * sf.keepRunoff).toFixed(0)}% (runoff) vs` +
+    ` ${(100 * sf.keepGrass).toFixed(0)}% (grass)`);
 
   return [
     ["drift boost: ~1s sustained drift banks tier 1", db.tierBanked >= 1],
@@ -488,7 +684,184 @@ function physicsChecks() {
     ["brake gate: reaches a full stop under held brake", bg.tStop !== null],
     ["brake gate: holds the stop >= 0.3s before reverse",
       bg.hold !== null && bg.hold >= 0.3],
+    // ---- three surfaces, and the runoff strictly between the other two ----
+    ["surfaces: runoff is strictly slower than road and strictly faster than grass",
+      sf.runoff < sf.road && sf.runoff > sf.grass],
+    ["surfaces: runoff is a nudge, not a penalty (>= 85% of road speed)",
+      sf.runoff >= 0.85 * sf.road],
+    ["surfaces: grass is still the thing to avoid (< 45% of road speed)",
+      sf.grass < 0.45 * sf.road],
+    ["surfaces: running wide onto concrete at speed costs < 10% in the first second",
+      sf.keepRunoff > 0.90 && sf.keepRunoff < 1 && sf.keepGrass < 0.6 * sf.keepRunoff],
   ];
+}
+
+// ------------------------------------------ gates, runoff and cutting
+//
+// Everything about the ACTIVE track's gate rules and its concrete skirt. Pure
+// geometry and gate arithmetic — no bot laps — so it costs milliseconds.
+function gateAndSurfaceChecks(p, novice) {
+  const id = T.TRACK_ID;
+  const q = s => `[${id}] ${s}`;
+  const cps = T.CHECKPOINTS;
+  const t = T.TRACK;
+
+  // ---- (1) a lap salvaged by crossing one checkpoint BACKWARDS is valid ----
+  const salvage = (() => {
+    const lap = T.createLap();
+    T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    cps.forEach((g, i) => {
+      // Take checkpoint 2 (or the last one, on a short list) backwards, as a
+      // driver who spun and reversed through it would.
+      const back = i === Math.min(1, cps.length - 1);
+      T.advanceLap(lap, ...crossAt(g, 0.5, back ? -1 : 1));
+    });
+    const ev = T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    return ev.finished && ev.finished.valid;
+  })();
+
+  // ---- (2) a checkpoint registers from well OFF the racing surface ----
+  const offSurface = cps.map(g => {
+    const u = outerU(g);
+    const x = g.ax + (g.bx - g.ax) * u, y = g.ay + (g.by - g.ay) * u;
+    return { surf: T.surfaceAt(x, y), dist: T.distToTrack(x, y) };
+  });
+  const wideEnough = offSurface.every(o => o.surf !== SURFACE.ROAD &&
+    o.dist > T.ROAD_HALF + 20);
+  const wideRegisters = (() => {
+    const lap = T.createLap();
+    T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    for (const g of cps) T.advanceLap(lap, ...crossAt(g, outerU(g), 1));
+    const ev = T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    return ev.finished && ev.finished.valid;
+  })();
+
+  // ---- (3) EXPLOITS ----
+  // (a) shuttling back and forth over one gate never advances past it.
+  const shuttle = (() => {
+    const lap = T.createLap();
+    T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    for (let i = 0; i < 12; i++) {
+      T.advanceLap(lap, ...crossAt(cps[0], 0.5, i % 2 ? -1 : 1));
+    }
+    return lap.nextCp === 1;
+  })();
+  // (b) the finish line is DIRECTIONAL: reversing back over it is not a
+  // crossing, and crossing it again forwards ends the lap as INVALID.
+  const finishDirectional = (() => {
+    const lap = T.createLap();
+    T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    const back = T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, -1));
+    const again = T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    return !back.started && !back.finished &&
+      again.finished && !again.finished.valid;
+  })();
+  // (c) taking the checkpoints in REVERSE order does not validate a lap.
+  const reverseOrder = (() => {
+    if (cps.length < 2) return true;
+    const lap = T.createLap();
+    T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    for (let i = cps.length - 1; i >= 0; i--) {
+      T.advanceLap(lap, ...crossAt(cps[i], 0.5, -1));
+    }
+    const ev = T.advanceLap(lap, ...crossAt(T.START_GATE, 0.5, 1));
+    return ev.finished && !ev.finished.valid;
+  })();
+
+  // ---- (4) CUTTING. The shortest gate-legal path there is, driven by a
+  // cheater with no cornering limit at all, against PRO's real clean lap.
+  const cut = walkPath(cheatPath(), p);
+
+  // ---- (5) THE RUNOFF: at the corners, on the outside, and not everywhere --
+  const kEnter = 1 / (8 * T.ROAD_HALF);       // the corner threshold it derives from
+  const bandsOK = (() => {
+    let ok = true, bands = 0;
+    for (const [arr, sgn] of [[t.RUNOFF_POS, 1], [t.RUNOFF_NEG, -1]]) {
+      let start = -1;
+      for (let k = 0; k < t.N; k++) if (arr[k] <= 0) { start = k; break; }
+      if (start < 0) return false;             // concrete the whole way round
+      let run = null;
+      for (let k = 0; k <= t.N; k++) {
+        const i = (start + k) % t.N;
+        if (arr[i] > 0) { (run || (run = [])).push(i); continue; }
+        if (!run) continue;
+        bands++;
+        // The band's peak curvature has to be a real corner, and the concrete
+        // has to be on the OUTSIDE of it (curvature > 0 bends toward +normal,
+        // so the outside is the -normal side).
+        let peak = 0;
+        for (const j of run) {
+          const kk = t.curvSigned(j);
+          if (Math.abs(kk) > Math.abs(peak)) peak = kk;
+        }
+        if (Math.abs(peak) < kEnter) ok = false;
+        if (Math.sign(peak) === Math.sign(sgn)) ok = false;
+        run = null;
+      }
+    }
+    return ok && bands > 0;
+  })();
+  // The longest stretch with no concrete on either side — the straights have
+  // to still be bare, or "at the corners" means nothing.
+  const bareRun = (() => {
+    let best = 0, cur = 0;
+    for (let k = 0; k < 2 * t.N; k++) {
+      const i = k % t.N;
+      if (t.RUNOFF_POS[i] <= 0 && t.RUNOFF_NEG[i] <= 0) {
+        cur += t.CUMLEN[i + 1] - t.CUMLEN[i];
+        if (cur > best) best = cur;
+      } else cur = 0;
+    }
+    return Math.min(best, t.TRACK_LEN) / t.TRACK_LEN;
+  })();
+
+  console.log(`  runoff: ${(100 * t.RUNOFF_COVERAGE).toFixed(1)}% of the lap has` +
+    ` concrete on one side (so ${(100 * (1 - t.RUNOFF_COVERAGE)).toFixed(0)}% has none),` +
+    ` in ${t.RUNOFF_CORNERS.length} skirt(s);` +
+    ` longest bare stretch ${(100 * bareRun).toFixed(0)}% of the lap`);
+  for (const c of t.RUNOFF_CORNERS) {
+    console.log(`    ${(100 * c.from).toFixed(0).padStart(3)}%-` +
+      `${(100 * c.to).toFixed(0).padStart(3)}%  ${pad(c.sector, 24)}` +
+      ` r ${c.radius.toFixed(0).padStart(4)} px, turns ${c.turnDeg.toFixed(0).padStart(3)}deg,` +
+      ` demand ${c.demand.toFixed(2)} -> ${c.width.toFixed(0)} px of concrete`);
+  }
+  console.log(`  checkpoint gates reach ${offSurface[0].dist.toFixed(0)} px from the` +
+    ` centerline at their outer tip (road half-width ${T.ROAD_HALF} px)`);
+  console.log(`  cutting: shortest gate-legal path ${cut.len.toFixed(0)} px` +
+    ` (${(100 * cut.len / T.TRACK_LEN).toFixed(0)}% of the lap),` +
+    ` ${cut.onSurface[2].toFixed(0)} px of it on grass;` +
+    ` best possible time on it ${cut.secs.toFixed(2)}s` +
+    ` (lap ${cut.valid ? "valid" : "INVALID"})`);
+
+  return {
+    cut,
+    checks: [
+      [q("checkpoints count in EITHER direction: a lap with one gate taken backwards is valid"),
+        salvage],
+      [q("checkpoint gates reach well past the road edge, into the runoff/grass"),
+        wideEnough],
+      [q("a checkpoint registers from the far tip of the gate, off the racing surface"),
+        wideRegisters],
+      [q("exploit: shuttling over one gate never advances past it"), shuttle],
+      [q("exploit: the finish line stays directional — reverse-and-recross scores an invalid lap"),
+        finishDirectional],
+      [q("exploit: taking the checkpoints in reverse order does not validate a lap"),
+        reverseOrder],
+      // "Not everywhere": a quarter of the lap has no concrete at all, and
+      // there is at least one unbroken bare stretch. The bare-stretch bar is
+      // low on purpose — the coil is seven linked corners with no straight
+      // longer than 91 px, so demanding a long bare run there would be
+      // demanding a different circuit. The load-bearing half of this gate is
+      // `bandsOK`: EVERY skirt is verified, from the width arrays themselves,
+      // to peak at a real corner and to sit on the OUTSIDE of it.
+      [q("runoff sits at corners, on the outside, and leaves bare track between them"),
+        bandsOK && bareRun >= 0.05 && (1 - T.TRACK.RUNOFF_COVERAGE) >= 0.25],
+      [q("runoff exists here at all (>= 10% of the lap)"),
+        T.TRACK.RUNOFF_COVERAGE >= 0.10],
+      [q("novice never reaches the grass (the concrete catches it)"),
+        novice.grassPct === 0],
+    ],
+  };
 }
 
 // Everything that has to hold ON THE ACTIVE TRACK. `results` is the runBot
@@ -506,14 +879,12 @@ function trackChecks(results) {
   // road for all of it — minimum distance to the road edge over the whole race
   // (ROAD_HALF minus the max centerline distance reached). Guards against
   // re-tunes that buy lap time by running the ragged edge of the grip limit.
-  const edgeMargin = rec => {
-    let maxD = 0;
-    for (const s of rec.samples) {
-      const d = T.distToTrack(s[0], s[1]);
-      if (d > maxD) maxD = d;
-    }
-    return T.ROAD_HALF - maxD;
-  };
+  // Margin to the ROAD edge, not the runoff edge. That choice is deliberate:
+  // the concrete skirt exists to forgive the player, and a bot allowed to
+  // measure itself against the outside of it would simply drive 30 px wider
+  // everywhere and call it a racing line. recordRace already tracked the
+  // furthest the car ever got from the centerline, so this is free.
+  const edgeMargin = rec => T.ROAD_HALF - rec.maxDist;
   const RACE_TIERS = [["novice", "novice"], ["mid", "expert"],
     ["pro", "pro"], ["proplus", "proplus"]];
   const races = {};
@@ -618,6 +989,12 @@ function trackChecks(results) {
       ppRec !== null && proRec !== null &&
       ppRec.bestFlyingTicks < proRec.bestFlyingTicks]);
   }
+
+  // ---- gate rules, the concrete skirt, and whether cutting pays ----
+  const gs = gateAndSurfaceChecks(p, nov);
+  checks.push(...gs.checks);
+  checks.push([q("cutting cannot pay: the shortest gate-legal path is slower than PRO's clean lap"),
+    proRec !== null && gs.cut.secs > proRec.bestFlyingTicks * TICK]);
 
   const summary = {
     id: trackId, name: T.TRACK_NAME, skill: T.TRACK.skillLabel,
@@ -752,24 +1129,49 @@ function main() {
   console.log(`  Boost levers:    ${ids.map(i => `${i} ${boost(i).toFixed(1)}%`).join(",  ")}`);
   console.log(`  Drift line:      ${ids.map(i => `${i} ${S[i].driftGain.toFixed(1)}%`).join(",  ")}`);
   checks.push(
-    [`differentiation: Top Speed is the biggest lever on ${speedT} (the speed track)`,
-      DRIVING_UPGRADES.every(u => u === "speed" || gain(speedT, u) < gain(speedT, "speed"))],
-    [`differentiation: Top Speed pays more on ${speedT} than on either other track`,
-      others(speedT).every(o => gain(speedT, "speed") > gain(o, "speed"))],
-    [`differentiation: Grip is the biggest lever on ${gripT} (the technical track)`,
-      DRIVING_UPGRADES.every(u => u === "grip" || gain(gripT, u) < gain(gripT, "grip"))],
-    [`differentiation: Grip pays more on ${gripT} than on either other track`,
-      others(gripT).every(o => gain(gripT, "grip") > gain(o, "grip"))],
     [`differentiation: Grip beats Top Speed on ${gripT}, and loses to it on ${speedT}`,
       gain(gripT, "grip") > gain(gripT, "speed") && gain(speedT, "grip") < gain(speedT, "speed")],
     [`differentiation: the boost upgrades pay >= 3% on ${boostT} (the drift track)`,
       boost(boostT) >= 3],
     [`differentiation: the boost upgrades pay >= 3x more on ${boostT} than anywhere else`,
       others(boostT).every(o => boost(boostT) >= 3 * Math.max(0, boost(o)))],
-    [`differentiation: the boost upgrades beat Grip on ${boostT}`,
-      boost(boostT) > gain(boostT, "grip")],
     [`differentiation: the drift line itself pays most on ${boostT}`,
       others(boostT).every(o => S[boostT].driftGain > S[o].driftGain)],
+  );
+
+  // ---- ...and the same question asked the way a player asks it: PER CREDIT.
+  // The specialist for each circuit must be the best thing that circuit's
+  // credits can buy, at every budget — this is the gate that says Top Speed is
+  // no longer the correct answer to every question.
+  const V = valuePerCredit(ids);
+  const SPECIALIST = { [speedT]: "speed", [gripT]: "grip", [boostT]: "boost" };
+  const RIVALS = [...DRIVING_UPGRADES, "boost"];
+  const vpc = (id, u, B) => V[id].rows[B][u].gain;
+  for (const id of ids) {
+    const want = SPECIALIST[id];
+    const label = want === "boost" ? "the boost pair" : UPGRADE_BY_ID[want].name;
+    checks.push([
+      `value/credit: ${label} is the best buy on ${id} at every budget ` +
+      `(${VPC_BUDGETS.join(", ")} cr)`,
+      VPC_BUDGETS.every(B => RIVALS.every(u =>
+        u === want || (want === "boost" && (u === "boostPwr" || u === "boostDur")) ||
+        vpc(id, u, B) < vpc(id, want, B)))]);
+    checks.push([
+      `value/credit: ${label} pays more on ${id} than on either other track`,
+      others(id).every(o => vpc(id, want, 3000) > vpc(o, want, 3000))]);
+  }
+  checks.push(
+    // The point of the rebalance: Top Speed is no longer the universal answer.
+    ["value/credit: Top Speed is NOT the best buy on the drift or the grip track",
+      VPC_BUDGETS.every(B => vpc(boostT, "speed", B) < vpc(boostT, "boost", B) &&
+        vpc(gripT, "speed", B) < vpc(gripT, "grip", B))],
+    // ...but it is still a real purchase, not a trap: it wins outright on its
+    // own circuit and is the second-best thing to own on the drift track.
+    [`value/credit: Top Speed still pays >= 10% on ${speedT} for a mid-game budget`,
+      vpc(speedT, "speed", 3000) >= 10],
+    [`value/credit: Top Speed is still worth buying on ${boostT} (>= 5%, second only to boost)`,
+      vpc(boostT, "speed", 3000) >= 5 &&
+      ["accel", "grip"].every(u => vpc(boostT, "speed", 3000) > vpc(boostT, u, 3000))],
   );
 
   console.log("\nAcceptance criteria:");
