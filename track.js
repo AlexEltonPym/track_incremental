@@ -317,8 +317,16 @@ export const RUNOFF_TUNING = {
   exitMaxRoads: 6.0,    // hard ceiling on the tail, in road half-widths
   exitGapFrac: 0.55,    // ...and never more than this much of the gap ahead
   // Taper at each end, as a fraction of the band's own length: concrete never
-  // starts with a step.
+  // starts with a step. Applied to the MERGED run, and capped so a very long
+  // skirt doesn't spend its whole length ramping.
   taper: 0.28,
+  taperMaxRoads: 2.2,   // longest ramp, in road half-widths
+  // No stubs: a skirt shorter than this is stretched up to it. A few metres of
+  // concrete is decoration, not somewhere you can actually gather the car up.
+  // Kept off a cliff: on a tight coil the skirts merge into one unbroken ring
+  // somewhere past ~4.5, which would pave the whole lap. 4.0 sits on the
+  // stable side of that.
+  minLenRoads: 4.0,     // minimum skirt length, in road half-widths
   // Two skirts separated by less than this many road half-widths are one
   // skirt. A double-apex corner (Longshore's are two 45 degrees arcs with a
   // 70 px link) is a single place a car runs wide, and paving it as two slabs
@@ -634,6 +642,10 @@ export function buildTrack(def) {
       const next = corners[(ci + 1) % corners.length];
       const gapAhead = corners.length < 2 ? TRACK_LEN
         : ((CUMLEN[next.lo] - CUMLEN[c.hi]) % TRACK_LEN + TRACK_LEN) % TRACK_LEN;
+      // ...and the straight behind, which is where a too-short skirt grows.
+      const prev = corners[(ci - 1 + corners.length) % corners.length];
+      const gapBehind = corners.length < 2 ? TRACK_LEN
+        : ((CUMLEN[c.lo] - CUMLEN[prev.hi]) % TRACK_LEN + TRACK_LEN) % TRACK_LEN;
       const radius = 1 / Math.abs(c.peakK);
       // How fast a reference car goes round here, as a fraction of a reference
       // top speed. THIS is the "how much runoff is warranted" number: a corner
@@ -647,16 +659,25 @@ export function buildTrack(def) {
       // car runs out toward -normal.
       const side = c.peakK > 0 ? -1 : 1;
       const arr = side > 0 ? RUNOFF_POS : RUNOFF_NEG;
-      const fromArc = CUMLEN[c.lo] + c.len * t.fromFrac;
       const exitLen = Math.min(c.len * t.exitFrac, t.exitMaxRoads * ROAD_HALF,
         gapAhead * t.exitGapFrac);
-      const bandLen = c.len * (1 - t.fromFrac) + exitLen;
-      const ramp = Math.max(1, bandLen * t.taper);
+      let bandLen = c.len * (1 - t.fromFrac) + exitLen;
+      // Too short to be useful? Grow BACKWARDS toward turn-in rather than
+      // further down the exit: the exit is already capped against the straight
+      // ahead, so lengthening there would close the gap to the next corner and
+      // pave the lap. The entry side is capped the same way against the
+      // straight behind, so a tight coil grows a little and no more.
+      const growBack = Math.min(Math.max(0, t.minLenRoads * ROAD_HALF - bandLen),
+        gapBehind * t.exitGapFrac);
+      const fromArc = CUMLEN[c.lo] + c.len * t.fromFrac - growBack;
+      bandLen += growBack;
+      // Poured FLAT here; the taper is applied at the end, once neighbouring
+      // bands have been merged. Tapering during the pour makes a band's ends
+      // near-zero, and the merge step then has only those near-zero values to
+      // join with — which is what produced pinched notches between skirts.
       let idx = indexAtArc(fromArc), gone = 0;
       while (gone <= bandLen) {
-        const f = Math.min(1, Math.min(gone, bandLen - gone) / ramp);
-        const v = w * f;
-        if (v > arr[idx]) arr[idx] = v;
+        if (w > arr[idx]) arr[idx] = w;
         gone += CUMLEN[idx + 1] - CUMLEN[idx];
         idx = (idx + 1) % N;
       }
@@ -668,8 +689,9 @@ export function buildTrack(def) {
       });
     }
 
-    // Bridge short gaps: a double-apex corner is one corner as far as running
-    // wide is concerned.
+    // Bridge short gaps: a double-apex corner is one place a car runs wide, so
+    // paving it as two slabs with a strip of grass between them is both ugly
+    // and a trap. Bands are still flat here, so the join is at full width.
     const gapMax = t.gapCloseRoads * ROAD_HALF;
     for (const arr of [RUNOFF_POS, RUNOFF_NEG]) {
       for (let i = 0; i < N; i++) {
@@ -682,8 +704,38 @@ export function buildTrack(def) {
         if (n >= N || gone > gapMax) continue;             // not a short gap
         const before = arr[((i - 1) % N + N) % N], after = arr[j];
         if (before <= 0 || after <= 0) continue;           // not between skirts
-        const fill = Math.min(before, after);
+        // Carry the WIDER neighbour across: the gap is inside one continuous
+        // run-off area, and stepping in and out of a narrow throat mid-corner
+        // is the shape this whole pass exists to avoid.
+        const fill = Math.max(before, after);
         for (let k = 0, m = i; k < n; k++, m = (m + 1) % N) arr[m] = fill;
+      }
+    }
+
+    // Taper, last: walk each merged run and ramp its two outer ends. Doing it
+    // here means the ramps belong to the final shape rather than to whichever
+    // bands happened to be poured, so a merged double-apex reads as one skirt
+    // that opens once and closes once.
+    for (const arr of [RUNOFF_POS, RUNOFF_NEG]) {
+      const seen = new Uint8Array(N);
+      for (let s = 0; s < N; s++) {
+        if (arr[s] <= 0 || seen[s]) continue;
+        if (arr[((s - 1) % N + N) % N] > 0) continue;      // not a run start
+        const run = [];
+        let runLen = 0;
+        for (let k = 0, m = s; k < N && arr[m] > 0; k++, m = (m + 1) % N) {
+          run.push(m); seen[m] = 1;
+          runLen += CUMLEN[m + 1] - CUMLEN[m];
+        }
+        if (!run.length) continue;
+        const ramp = Math.max(1, Math.min(runLen * t.taper, t.taperMaxRoads * ROAD_HALF));
+        let along = 0;
+        for (const m of run) {
+          const dl = CUMLEN[m + 1] - CUMLEN[m];
+          const f = Math.min(1, Math.min(along, runLen - along) / ramp);
+          arr[m] *= f;
+          along += dl;
+        }
       }
     }
   })();
