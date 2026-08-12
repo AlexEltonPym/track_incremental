@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trackcrimental — incremental time-trial racer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1e2228;
+    --panel-edge: #2c323b;
+    --text: #d8dde4;
+    --dim: #8b94a1;
+    --accent: #ffc857;
+    --good: #6fe08b;
+    --bad: #e0706f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 14px;
+  }
+  #game {
+    background: #223321;
+    border: 1px solid var(--panel-edge);
+    border-radius: 6px;
+    display: block;
+  }
+  #panel {
+    width: 270px;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 6px;
+    padding: 14px;
+    font-size: 14px;
+  }
+  #panel h1 {
+    font-size: 17px;
+    margin: 0 0 10px;
+    color: var(--accent);
+    letter-spacing: 0.5px;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+  }
+  .stat-row .label { color: var(--dim); }
+  .stat-row .value { font-variant-numeric: tabular-nums; }
+  #currency { color: var(--accent); font-weight: 600; }
+  hr { border: none; border-top: 1px solid var(--panel-edge); margin: 10px 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin: 0 0 8px; }
+  .upgrade {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .upgrade .info { flex: 1; }
+  .upgrade .name { font-size: 13px; }
+  .upgrade .lvl { font-size: 11px; color: var(--dim); }
+  .upgrade button {
+    background: #2a3038;
+    color: var(--text);
+    border: 1px solid #3a424d;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    min-width: 72px;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  .upgrade button:hover:not(:disabled) { background: #343c46; border-color: var(--accent); }
+  .upgrade button:disabled { opacity: 0.45; cursor: default; }
+  #help { font-size: 12px; color: var(--dim); line-height: 1.5; }
+  #msg { min-height: 18px; font-size: 12px; color: var(--good); margin-top: 6px; }
+</style>
+</head>
+<body>
+  <canvas id="game" width="960" height="620"></canvas>
+  <div id="panel">
+    <h1>TRACKCRIMENTAL</h1>
+    <div class="stat-row"><span class="label">Lap</span><span class="value" id="raceLap">– / 3</span></div>
+    <div class="stat-row"><span class="label">Lap time</span><span class="value" id="lapTime">–</span></div>
+    <div class="stat-row"><span class="label">Best lap</span><span class="value" id="bestTime">–</span></div>
+    <div class="stat-row"><span class="label">Checkpoints</span><span class="value" id="cpStatus">–</span></div>
+    <div class="stat-row"><span class="label">Bot best lap</span><span class="value" id="refLaps" style="color:var(--dim);text-align:right;font-size:13px;line-height:1.35">–</span></div>
+    <hr>
+    <div class="stat-row"><span class="label">Credits</span><span class="value" id="currency">0</span></div>
+    <div class="stat-row"><span class="label">Ghost payout</span><span class="value" id="payout">–</span></div>
+    <div class="stat-row"><span class="label">Income</span><span class="value" id="income">–</span></div>
+    <hr>
+    <h2>Upgrades</h2>
+    <div id="upgrades"></div>
+    <div id="msg"></div>
+    <hr>
+    <div id="help">
+      <b>Drive:</b> WASD / arrows<br>
+      <b>Drift (handbrake):</b> Space or Shift<br>
+      <b>Re-grid / restart the 3-lap race:</b> R<br>
+      <b>Bot ghosts on/off:</b> G<br>
+      <b>Zoom out / in:</b> scroll wheel<br><br>
+      Your best lap becomes a ghost that loops forever, earning credits you
+      spend on upgrades — then beat it.
+    </div>
+  </div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

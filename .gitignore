@@ -1,0 +1,20 @@
+# Dependencies (the game itself is dependency-free; this is for tooling only)
+node_modules/
+
+# Logs and debug output
+*.log
+npm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local scratch / experiment output
+scratchpad/
+tmp/
+*.local.*

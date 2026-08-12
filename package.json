@@ -1,0 +1,11 @@
+{
+  "name": "trackcrimental",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Incremental top-down time-trial racer prototype (no dependencies).",
+  "scripts": {
+    "test:bot": "node test/drive_bot.mjs",
+    "test:sweep": "node test/drive_bot.mjs sweep"
+  }
+}
