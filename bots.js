@@ -690,7 +690,19 @@ export function makeBot(skill, params) {
     const paceCap = (skill.paceCap ?? (T.ROAD_HALF * REACTION_ROADS) /
       Math.max(TICK, skill.decisionTicks * TICK)) *
       (1 + PACE_CAP_GAIN * (params.topSpeed / SPEED_REF - 1));
-    let vAllow = Math.min(params.topSpeed, paceCap);
+    // A FIRING BOOST RAISES THE CAR'S CEILING, and the driver knows it: the
+    // cap the speed controller drives at is the boosted one while a burst is
+    // lit. Without this the bot's own throttle controller sees "we are over
+    // top speed" the instant its drift boost fires and BRAKES — and since
+    // braking also cancels the boost shove (physics.js), the burst it just
+    // earned was thrown away one tick after it arrived. That is why Boost
+    // Power measured as a worthless upgrade for every bot: they never spent
+    // the speed it bought. Corner limits below are unaffected — a boosting car
+    // still slows down for the next corner, it just no longer brakes against
+    // its own straight-line burst.
+    const capNow = params.topSpeed *
+      (1 + (car.boostTime > 0 ? car.boostAmt : 0));
+    let vAllow = Math.min(capNow, Math.max(paceCap, car.boostTime > 0 ? capNow : 0));
     for (let d = 0; d <= reach; d += step) {
       const idx = T.indexAtArc(arcHere + d);
       const k = T.curvatureAt(idx, 4);
@@ -1142,16 +1154,26 @@ export function simulateBotField(params, opts = {}) {
 }
 
 // Memoised wrapper: re-grids and repeated calls with an unchanged car and
-// track reuse the simulation instead of redoing it. One slot is enough —
-// the player's spec only moves forward.
-let cachedKey = null, cachedField = null;
+// track reuse the simulation instead of redoing it. A handful of slots, not
+// one: the player's SPEC only moves forward, but the TRACK moves back and
+// forth as they flip between circuits in the selector, and re-simulating a
+// whole field (tens of ms) on every flip is exactly the stutter this cache
+// exists to avoid. Keyed on (car spec + track signature + lap count).
+const FIELD_CACHE_MAX = 8;
+const fieldCache = new Map();
 export function botField(params, opts = {}) {
   const key = fieldSignature(params) + "|laps=" + (opts.laps ?? 3);
-  if (key !== cachedKey) {
-    cachedField = simulateBotField(params, opts);
-    cachedKey = key;
-  } else {
-    cachedField.simMs = 0;      // served from cache
+  const hit = fieldCache.get(key);
+  if (hit) {
+    hit.simMs = 0;              // served from cache
+    fieldCache.delete(key);     // refresh LRU position
+    fieldCache.set(key, hit);
+    return hit;
   }
-  return cachedField;
+  const field = simulateBotField(params, opts);
+  fieldCache.set(key, field);
+  if (fieldCache.size > FIELD_CACHE_MAX) {
+    fieldCache.delete(fieldCache.keys().next().value);
+  }
+  return field;
 }

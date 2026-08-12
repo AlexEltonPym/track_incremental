@@ -5,9 +5,12 @@
 import {
   TICK, carParams, createCarState, stepCar,
 } from "./physics.js";
+// track.js exports the ACTIVE track's geometry as ES module live bindings, so
+// these names follow setTrack() with no re-import and no plumbing.
+import * as T from "./track.js";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
-  distToTrack, createLap, advanceLap,
+  TRACKS, DEFAULT_TRACK, distToTrack, createLap, advanceLap,
 } from "./track.js";
 import { botField } from "./bots.js";
 
@@ -22,6 +25,12 @@ const MAX_LAP_TICKS = 60 * 300;   // abort recording after 5 minutes
 // untouched — your best single lap still becomes the earning ghost, which
 // loops forever and pays per loop.
 const RACE_LAPS = 3;
+// What YOUR OWN valid lap pays, as a multiple of what one loop of the earning
+// ghost pays for a lap of the same length. Deliberately more than 1: the ghost
+// is idle income you set up once, and actually driving the lap yourself should
+// beat watching a recording of yourself drive it. (The ghost's rate is
+// round(720 / lapSeconds) x payoutMult per loop — see ghostPayoutFor.)
+const PLAYER_LAP_MULT = 2.5;
 
 // ---------------------------------------------------------------- persistence
 // PROTOTYPING MODE. With PERSISTENCE = false the game never reads or writes
@@ -31,13 +40,14 @@ const RACE_LAPS = 3;
 // intact and correct — flip this one constant back to true to restore saving.
 const PERSISTENCE = false;
 
-const SAVE_KEY = "trackcrimental_v4";
-// Wiped: old physics/track = old ghosts and times invalid (v4: the v3 circuit
-// with its tight hairpin plus the buffed drift boost changed both the lap
-// distance and what lap times are earnable).
+const SAVE_KEY = "trackcrimental_v5";
+// Wiped: old physics/track = old ghosts and times invalid (v5: three circuits
+// instead of one, so best laps and ghost recordings are now per track and the
+// single-track shape cannot be migrated — the recordings were driven on a
+// layout that no longer exists).
 const OLD_SAVE_KEYS = ["trackcrimental_v0", "trackcrimental_v1",
-  "trackcrimental_v2", "trackcrimental_v3"];
-const SAVE_VERSION = 4;
+  "trackcrimental_v2", "trackcrimental_v3", "trackcrimental_v4"];
+const SAVE_VERSION = 5;
 
 const CAM_ZOOM_SLOW = 1.7;        // zoom at standstill (was fixed 2.0: more vision now)
 const CAM_ZOOM_FAST = 1.45;       // zoom at top speed — fast = even more forward vision
@@ -102,12 +112,29 @@ function upgradeCost(u, lvl) {
 
 // ---------------------------------------------------------------- state
 
+// PER-TRACK STATE. A best lap, and the earning ghost recorded on it, belong to
+// the circuit they were set on — a 9 s lap of the coil is not comparable with
+// a 12 s lap of the speedway, and a recording played back on the wrong track
+// would drive through the grass. So each track keeps its own.
+//
+// INCOME: every track's ghost keeps paying, all the time, whichever circuit
+// you are currently on. Setting a first lap on a new track is therefore a
+// permanent income increase, which is the incremental-game shape this wants:
+// unlocking breadth pays, and Ghost Fleet multiplies the ghosts on EVERY track
+// rather than making you choose one to farm.
+function blankTrackState() {
+  return {
+    bestTicks: null,    // best lap length in physics ticks
+    ghostRec: null,     // best lap samples: [[x, y, angle], ...] one per tick
+    ghostIndex: 0,      // earning-ghost playhead
+  };
+}
+
 const state = {
   currency: 0,
   levels: { speed: 0, accel: 0, grip: 0, boostPwr: 0, boostDur: 0, payout: 0, ghosts: 0 },
-  bestTicks: null,      // best lap length in physics ticks
-  ghostRec: null,       // best lap samples: [[x, y, angle], ...] one per tick
-  ghostIndex: 0,
+  trackId: DEFAULT_TRACK,
+  tracks: Object.fromEntries(TRACKS.map(t => [t.id, blankTrackState()])),
   car: createCarState(START_POS.x, START_POS.y, START_ANGLE),
   lap: createLap(),
   lapRec: [],           // current lap recording
@@ -225,16 +252,25 @@ function resetCar() {
 function save() {
   if (!PERSISTENCE) return;
   try {
+    const tracks = {};
+    for (const [id, ts] of Object.entries(state.tracks)) {
+      if (ts.bestTicks === null) continue;
+      tracks[id] = {
+        bestTicks: ts.bestTicks,
+        ghostRec: ts.ghostRec
+          ? ts.ghostRec.map(s => [Math.round(s[0] * 10) / 10,
+            Math.round(s[1] * 10) / 10, Math.round(s[2] * 1000) / 1000])
+          : null,
+      };
+    }
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       version: SAVE_VERSION,
       currency: state.currency,
       levels: state.levels,
-      bestTicks: state.bestTicks,
+      trackId: state.trackId,
+      tracks,
       showBotGhosts: state.showBotGhosts,
       userZoom: state.userZoom,
-      ghostRec: state.ghostRec
-        ? state.ghostRec.map(s => [Math.round(s[0] * 10) / 10, Math.round(s[1] * 10) / 10, Math.round(s[2] * 1000) / 1000])
-        : null,
     }));
   } catch (e) { /* storage may be unavailable; play on without saving */ }
 }
@@ -267,30 +303,54 @@ function load() {
     for (const u of UPGRADES) {
       if (d.levels && Number.isInteger(d.levels[u.id])) state.levels[u.id] = d.levels[u.id];
     }
-    if (Number.isInteger(d.bestTicks) && Array.isArray(d.ghostRec) && d.ghostRec.length > 1) {
-      state.bestTicks = d.bestTicks;
-      state.ghostRec = d.ghostRec;
+    if (d.trackId && state.tracks[d.trackId]) state.trackId = d.trackId;
+    // Per-track records. Unknown ids (a circuit that was renamed or dropped)
+    // are simply ignored, and a track with no entry starts blank.
+    for (const [id, rec] of Object.entries(d.tracks || {})) {
+      const ts = state.tracks[id];
+      if (!ts || !rec) continue;
+      if (Number.isInteger(rec.bestTicks) && Array.isArray(rec.ghostRec) &&
+          rec.ghostRec.length > 1) {
+        ts.bestTicks = rec.bestTicks;
+        ts.ghostRec = rec.ghostRec;
+      }
     }
   } catch (e) { /* corrupt save: start fresh */ }
 }
 
 // ---------------------------------------------------------------- economy
 
-function ghostLapSeconds() { return state.bestTicks / 60; }
+// The active track's records (best lap + its earning ghost).
+function here() { return state.tracks[state.trackId]; }
 
-function ghostPayout() {
-  // Faster laps pay more per lap (and also loop more often).
-  return Math.max(1, Math.round((60 / ghostLapSeconds()) * 12)) * params.payoutMult;
+// Credits one loop of an earning ghost pays, for a lap of `ticks`.
+// Faster laps pay more per lap (and also loop more often).
+function payoutFor(ticks) {
+  return Math.max(1, Math.round((60 / (ticks / 60)) * 12)) * params.payoutMult;
+}
+function ghostPayout(ts = here()) {
+  return ts.bestTicks === null ? 0 : payoutFor(ts.bestTicks);
 }
 
-// How many earning ghosts are on track (Ghost Fleet Lv0 = the original one).
+// Credits/minute from ALL tracks' ghosts together — every circuit you have set
+// a lap on keeps earning while you drive whichever one you are on.
+function totalIncomePerMin() {
+  let sum = 0;
+  for (const ts of Object.values(state.tracks)) {
+    if (ts.bestTicks === null) continue;
+    sum += ghostCount() * ghostPayout(ts) * 60 / (ts.bestTicks / 60);
+  }
+  return sum;
+}
+
+// How many earning ghosts are on track, per circuit (Ghost Fleet Lv0 = one).
 function ghostCount() { return 1 + state.levels.ghosts; }
 
 // Playback index of earning ghost `k`, staggered evenly around the lap so the
 // fleet is spread out rather than stacked on top of each other.
-function ghostSampleIndex(k) {
-  const len = state.ghostRec.length;
-  return (state.ghostIndex + Math.round(k * len / ghostCount())) % len;
+function ghostSampleIndex(k, ts = here()) {
+  const len = ts.ghostRec.length;
+  return (ts.ghostIndex + Math.round(k * len / ghostCount())) % len;
 }
 
 // ---------------------------------------------------------------- input
@@ -386,16 +446,25 @@ function physicsStep() {
     if (state.lap.ticks > MAX_LAP_TICKS) { state.lap.active = false; state.lapRec = []; }
   }
   if (ev.finished && ev.finished.valid) {
-    // ECONOMY (unchanged): the best SINGLE lap — whichever of the race's
-    // laps it is — becomes the earning ghost that loops forever and pays.
-    if (state.bestTicks === null || ev.finished.ticks < state.bestTicks) {
-      state.bestTicks = ev.finished.ticks;
-      state.ghostRec = state.lapRec.slice();
-      state.ghostIndex = 0;
-      flashMsg(`New best: ${fmtTime(ev.finished.ticks)} — ghost updated!`);
+    // ECONOMY. Two things happen on a clean lap:
+    //   1. YOU GET PAID FOR DRIVING IT. A valid lap pays PLAYER_LAP_MULT times
+    //      what one loop of an earning ghost of the same length pays — actively
+    //      driving beats watching a recording of yourself drive.
+    //   2. The best SINGLE lap on THIS TRACK — whichever of the race's laps it
+    //      is — becomes that track's earning ghost, which loops forever and
+    //      pays whether or not you are still on this circuit.
+    const ts = here();
+    const lapPay = payoutFor(ev.finished.ticks) * PLAYER_LAP_MULT;
+    state.currency += lapPay;
+    const paid = `+${Math.round(lapPay)} cr`;
+    if (ts.bestTicks === null || ev.finished.ticks < ts.bestTicks) {
+      ts.bestTicks = ev.finished.ticks;
+      ts.ghostRec = state.lapRec.slice();
+      ts.ghostIndex = 0;
+      flashMsg(`New best: ${fmtTime(ev.finished.ticks)} — ${paid}, ghost updated!`);
       save();
     } else {
-      flashMsg(`Lap: ${fmtTime(ev.finished.ticks)} (best ${fmtTime(state.bestTicks)})`);
+      flashMsg(`Lap: ${fmtTime(ev.finished.ticks)} — ${paid} (best ${fmtTime(ts.bestTicks)})`);
     }
     // RACE (framing only): three laps, lap 1 from the standing start. The
     // third finish ends the race and puts you straight back on the grid,
@@ -418,21 +487,25 @@ function physicsStep() {
     state.lapRec = [[c.x, c.y, c.angle]];
   }
 
-  // ---- ghost playback + income ----
-  // The fleet all replays the SAME best-lap recording, each offset by a fixed
-  // slice of the lap, and each pays a full lap's credits when its own offset
-  // playhead wraps the line — so income is exactly ghostCount() x the single
-  // ghost's rate, but arrives in evenly spaced instalments rather than one
-  // lump. (Ghosts are income and decoration only: they never collide.)
-  if (state.ghostRec) {
-    const len = state.ghostRec.length;
-    const n = ghostCount();
-    const prev = state.ghostIndex;
-    state.ghostIndex = (state.ghostIndex + 1) % len;
-    const pay = ghostPayout();
+  // ---- ghost playback + income, ON EVERY TRACK ----
+  // Each circuit's fleet replays THAT circuit's best-lap recording, each ghost
+  // offset by a fixed slice of the lap, and each pays a full lap's credits
+  // when its own offset playhead wraps the line — so income is exactly
+  // ghostCount() x the single ghost's rate per track, arriving in evenly
+  // spaced instalments rather than one lump. The tracks you are NOT currently
+  // driving keep their playheads running and keep paying; only the active
+  // track's ghosts are drawn. (Ghosts are income and decoration only: they
+  // never collide.)
+  const n = ghostCount();
+  for (const ts of Object.values(state.tracks)) {
+    if (!ts.ghostRec) continue;
+    const len = ts.ghostRec.length;
+    const prev = ts.ghostIndex;
+    ts.ghostIndex = (ts.ghostIndex + 1) % len;
+    const pay = ghostPayout(ts);
     for (let k = 0; k < n; k++) {
       const off = Math.round(k * len / n);
-      if ((prev + off) % len > (state.ghostIndex + off) % len) state.currency += pay;
+      if ((prev + off) % len > (ts.ghostIndex + off) % len) state.currency += pay;
     }
   }
 
@@ -648,11 +721,11 @@ function renderWorld() {
     }
   }
 
-  // Earning ghost fleet: your best lap, replayed `ghostCount()` times over,
-  // spread evenly around the circuit. The lead ghost is the brightest.
-  if (state.ghostRec) {
+  // Earning ghost fleet: your best lap ON THIS TRACK, replayed `ghostCount()`
+  // times over, spread evenly around the circuit. The lead ghost is brightest.
+  if (here().ghostRec) {
     for (let k = ghostCount() - 1; k >= 0; k--) {
-      const g = state.ghostRec[ghostSampleIndex(k)];
+      const g = here().ghostRec[ghostSampleIndex(k)];
       drawCar(g[0], g[1], g[2], k === 0 ? 0.38 : 0.26, k === 0 ? "#cfe8ff" : "#9fd0f5");
     }
   }
@@ -681,7 +754,10 @@ function renderWorld() {
 
 // Minimap: full track outline + player/ghost dots, top-right corner.
 const MM_W = 172, MM_H = 122, MM_PAD = 10;
-const mmBounds = (() => {
+// Recomputed on every track change: each circuit has its own bounding box, so
+// the minimap re-fits rather than drawing the new track at the old one's scale.
+let mmBounds = null;
+function fitMinimap() {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of CENTER) {
     if (p[0] < minX) minX = p[0];
@@ -690,10 +766,11 @@ const mmBounds = (() => {
     if (p[1] > maxY) maxY = p[1];
   }
   const s = Math.min((MM_W - 24) / (maxX - minX), (MM_H - 24) / (maxY - minY));
-  return { minX, minY, s,
+  mmBounds = { minX, minY, s,
     ox: (MM_W - (maxX - minX) * s) / 2,
     oy: (MM_H - (maxY - minY) * s) / 2 };
-})();
+}
+fitMinimap();
 
 function mmPoint(x, y) {
   return [
@@ -746,9 +823,9 @@ function renderMinimap() {
   }
 
   // Ghost fleet dots.
-  if (state.ghostRec) {
+  if (here().ghostRec) {
     for (let k = 0; k < ghostCount(); k++) {
-      const g = state.ghostRec[ghostSampleIndex(k)];
+      const g = here().ghostRec[ghostSampleIndex(k)];
       const gp = mmPoint(g[0], g[1]);
       ctx.fillStyle = k === 0 ? "#8fc3f0" : "#6b9ec6";
       ctx.beginPath();
@@ -820,7 +897,52 @@ function render() {
 
 const el = id => document.getElementById(id);
 const upgradeButtons = {};
+const trackButtons = {};
 let msgTimer = null;
+
+// ---------------------------------------------------------------- tracks
+
+// Switch circuit: swap the geometry (track.js's live bindings), re-fit the
+// minimap, re-simulate the bot field for the new track (cached per track in
+// bots.js, so flipping back is instant) and put everyone back on the grid.
+// Records, ghosts and the 3-lap race are per track, so what you see after the
+// switch is THIS circuit's history.
+function switchTrack(id) {
+  if (id === state.trackId || !state.tracks[id]) return;
+  T.setTrack(id);
+  state.trackId = id;
+  fitMinimap();
+  marks.length = 0;             // tire marks belong to the track they were laid on
+  refreshBotField();
+  resetCar();
+  updateTrackButtons();
+  save();
+  const meta = TRACKS.find(t => t.id === id);
+  const ts = here();
+  flashMsg(`${meta.name} — ${meta.skillLabel}. ` +
+    (ts.bestTicks === null ? "No lap set here yet." : `Best ${fmtTime(ts.bestTicks)}.`));
+}
+
+function buildTrackSelector() {
+  const wrap = el("trackSel");
+  for (const t of TRACKS) {
+    const btn = document.createElement("button");
+    btn.textContent = t.short;
+    btn.title = `${t.name} — rewards ${t.skillLabel}`;
+    btn.addEventListener("click", () => switchTrack(t.id));
+    wrap.appendChild(btn);
+    trackButtons[t.id] = btn;
+  }
+  updateTrackButtons();
+}
+
+function updateTrackButtons() {
+  for (const t of TRACKS) {
+    trackButtons[t.id].classList.toggle("on", t.id === state.trackId);
+  }
+  const meta = TRACKS.find(t => t.id === state.trackId);
+  el("trackName").textContent = meta.skillLabel;
+}
 
 function flashMsg(text) {
   el("msg").textContent = text;
@@ -870,19 +992,20 @@ function updatePanel() {
       ? `${Math.min(state.raceLaps.length + 1, RACE_LAPS)} / ${RACE_LAPS}`
       : `– / ${RACE_LAPS}`;
   el("lapTime").textContent = state.lap.active ? fmtTime(state.lap.ticks) : "–";
-  el("bestTime").textContent = state.bestTicks !== null ? fmtTime(state.bestTicks) : "–";
+  const ts = here();
+  el("bestTime").textContent = ts.bestTicks !== null ? fmtTime(ts.bestTicks) : "–";
   el("cpStatus").textContent = state.lap.active
     ? `${state.lap.nextCp} / ${CHECKPOINTS.length}` : "–";
   el("currency").textContent = Math.floor(state.currency).toLocaleString();
-  if (state.bestTicks !== null) {
-    const pay = ghostPayout();
+  // Ghost payout is THIS track's ghost; income is every track's ghosts added up.
+  if (ts.bestTicks !== null) {
     const n = ghostCount();
-    el("payout").textContent = `${Math.round(pay)} / lap` + (n > 1 ? ` x${n}` : "");
-    el("income").textContent = `${Math.round(n * pay * 60 / ghostLapSeconds())} / min`;
+    el("payout").textContent = `${Math.round(ghostPayout(ts))} / lap` + (n > 1 ? ` x${n}` : "");
   } else {
     el("payout").textContent = "–";
-    el("income").textContent = "–";
   }
+  const income = totalIncomePerMin();
+  el("income").textContent = income > 0 ? `${Math.round(income)} / min` : "–";
   for (const u of UPGRADES) {
     const lvl = state.levels[u.id];
     const cost = upgradeCost(u, lvl);
@@ -913,7 +1036,11 @@ function frame(now) {
 }
 
 load();
+T.setTrack(state.trackId);
+fitMinimap();
+resetCar();
 params = carParams(state.levels);
+buildTrackSelector();
 buildUpgradePanel();
 // Simulate the reference field for the loaded car before the first frame, so
 // the grid is populated and the HUD shows real bot times immediately.
@@ -923,7 +1050,10 @@ requestAnimationFrame(frame);
 
 // Debug/test hook (used by automated verification; harmless in play).
 window.__game = {
-  state, resetCar, save, marks,
+  state, resetCar, save, marks, switchTrack,
+  get track() { return { id: T.TRACK_ID, name: T.TRACK_NAME, len: T.TRACK_LEN,
+    cps: CHECKPOINTS.length, sig: T.TRACK_SIGNATURE }; },
+  get tracks() { return TRACKS; },
   get botGhosts() { return botGhosts; },
   get simMs() { return lastSimMs; },
   refreshBotField,

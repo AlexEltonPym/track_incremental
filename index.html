@@ -80,6 +80,19 @@
   }
   .upgrade button:hover:not(:disabled) { background: #343c46; border-color: var(--accent); }
   .upgrade button:disabled { opacity: 0.45; cursor: default; }
+  #trackSel { display: flex; gap: 4px; margin: 4px 0 8px; }
+  #trackSel button {
+    flex: 1;
+    background: #2a3038;
+    color: var(--dim);
+    border: 1px solid #3a424d;
+    border-radius: 4px;
+    padding: 4px 2px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #trackSel button:hover { background: #343c46; }
+  #trackSel button.on { color: var(--accent); border-color: var(--accent); background: #343c46; }
   #help { font-size: 12px; color: var(--dim); line-height: 1.5; }
   #msg { min-height: 18px; font-size: 12px; color: var(--good); margin-top: 6px; }
 </style>
@@ -88,6 +101,8 @@
   <canvas id="game" width="960" height="620"></canvas>
   <div id="panel">
     <h1>TRACKCRIMENTAL</h1>
+    <div class="stat-row"><span class="label">Track</span><span class="value" id="trackName">–</span></div>
+    <div id="trackSel"></div>
     <div class="stat-row"><span class="label">Lap</span><span class="value" id="raceLap">– / 3</span></div>
     <div class="stat-row"><span class="label">Lap time</span><span class="value" id="lapTime">–</span></div>
     <div class="stat-row"><span class="label">Best lap</span><span class="value" id="bestTime">–</span></div>
