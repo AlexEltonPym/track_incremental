@@ -343,6 +343,12 @@ it. All of them run against the *shipped* 3-lap race recordings:
 - **on-road margin** — the whole 3-lap race must stay ≥ 8 px (PRO) / ≥ 3 px
   (PRO+) inside the road edge, so no re-tune can buy time by scraping grass
   or by holding together for only one lap
+- **upgrade scaling** — because the bots race your upgraded car, the field is
+  re-simulated at upgrade levels 5 and 10: every tier must still string three
+  valid laps together, the ladder must still hold, and the upgrades must
+  actually make every bot faster. The harness prints the full scaling table
+  (lap times, on-road margin, off-road time and PRO+'s derived drift plan)
+  for both levels
 
 ## Current features (v4)
 
@@ -402,6 +408,6 @@ it. All of them run against the *shipped* 3-lap race recordings:
 - localStorage save/load (credits, upgrade levels, best time, ghost
   recording, bot-ghost visibility) — save key v4; older saves are wiped on
   load because physics changes invalidate their ghost lap times
-- Headless bot-driver harness with F1-style telemetry, acceptance gates,
+- Headless bot-driver harness with F1-style telemetry, 32 acceptance gates,
   scripted drift-boost / drift-control / exploit-regression / brake-gate
-  feature tests, and a bot ghost exporter
+  feature tests, and an upgrade-scaling regression gate
