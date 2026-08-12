@@ -9,26 +9,40 @@ export const TICK = 1 / 60;      // fixed physics timestep (s)
 export const PX_PER_M = 10;      // px per meter (for telemetry g conversion)
 export const G_PX = 9.81 * PX_PER_M; // 1 g in px/s^2
 
-// Car parameters derived from upgrade levels ({speed, accel, grip, payout}).
+// Car parameters derived from upgrade levels. The DRIVING upgrades are
+// {speed, accel, grip, boostPwr, boostDur}; {payout, ghosts} are economy only
+// and never touch the car (the bot invariants in test/drive_bot.mjs sweep the
+// driving five and deliberately ignore the economy two).
 // Pass ZERO_LEVELS for the stock car.
-export const ZERO_LEVELS = { speed: 0, accel: 0, grip: 0, payout: 0 };
+export const ZERO_LEVELS = {
+  speed: 0, accel: 0, grip: 0, payout: 0, boostPwr: 0, boostDur: 0, ghosts: 0,
+};
+
+// The levels a car's HANDLING depends on, in the order the harness sweeps them.
+export const DRIVING_UPGRADES = ["speed", "accel", "grip", "boostPwr", "boostDur"];
 
 export function carParams(levels = ZERO_LEVELS) {
-  const l = levels;
+  // Tolerate partial level objects (older saves, harness call sites).
+  const l = k => levels[k] || 0;
+  // Braking is bought BY BOTH the acceleration upgrade and, at a third of the
+  // rate, by top speed: a faster car that could not also stop harder would be
+  // a downgrade at every corner on the circuit, and "an upgrade is never a
+  // downgrade" is a hard invariant here (see README, bot invariants).
+  const stopPower = 1 + 0.08 * l("accel") + 0.026 * l("speed");
   return {
-    topSpeed: 280 * (1 + 0.10 * l.speed),  // px/s
+    topSpeed: 280 * (1 + 0.10 * l("speed")),  // px/s
     // Deliberately modest low-end punch: 0 -> 90% of top speed takes ~2.7 s
     // (with rollDrag below), which makes the drift boost worth earning.
-    accel:    150 * (1 + 0.12 * l.accel),  // px/s^2
-    brake:    400 * (1 + 0.08 * l.accel),  // px/s^2
+    accel:    150 * (1 + 0.12 * l("accel")),  // px/s^2
+    brake:    400 * stopPower,                // px/s^2
     reverseMax: 110,                       // px/s
     reverseDelay: 0.35,   // s of held brake at standstill before reverse engages
 
     // Steering. Yaw rate is limited by BOTH a low-speed cap (maxTurn) and a
     // lateral-acceleration budget (maxLatAccel / v) — so high speed means
     // gentler steering by construction, never twitchy.
-    maxTurn:     1.85 + 0.10 * l.grip,     // rad/s cap at low speed
-    maxLatAccel: 460 + 55 * l.grip,        // px/s^2 (~4.7 g stock: arcade/kart grip)
+    maxTurn:     1.85 + 0.10 * l("grip"),     // rad/s cap at low speed
+    maxLatAccel: 460 + 55 * l("grip"),        // px/s^2 (~4.7 g stock: arcade/kart grip)
     lowSpeedRef: 60,                       // px/s: full steering authority above this
 
     // Steering input smoothing: ramp toward target at these rates (units of
@@ -39,7 +53,7 @@ export function carParams(levels = ZERO_LEVELS) {
 
     // Lateral grip: exponential decay rate of lateral velocity (1/s).
     // First-order (no overshoot) — releasing steering can never fishtail.
-    latGrip: 11 + 1.0 * l.grip,
+    latGrip: 11 + 1.0 * l("grip"),
 
     // Handbrake drift.
     // A steady full-lock slide turns the CAR'S PATH at latGrip * driftGrip *
@@ -51,7 +65,15 @@ export function carParams(levels = ZERO_LEVELS) {
     // so THE HAIRPIN (best line ~100 px) is only flick-able on the way in,
     // not slide-able all the way round — turn 1's 228 px sweeper is where the
     // charge is banked.
-    driftGrip:     0.30,  // lateral grip multiplier while sliding
+    // ...and the slide is deliberately ANCHORED against the grip upgrade: a
+    // slide's path turn rate is latGrip * driftGrip * sin(slip), so leaving
+    // driftGrip fixed made every slide rotate three times tighter at grip Lv20
+    // (5.6 rad/s), which no corner on the map can follow — a drift became a
+    // way to spear the inside kerb, and PRO+ (the drift tier) ended up SLOWER
+    // than PRO on a grippy car. Scaling driftGrip back by (11 / latGrip)^0.85
+    // keeps the handbrake meaning the same manoeuvre at every spec, with a
+    // gentle real gain: 1.97 rad/s stock, 2.3 rad/s at Lv20.
+    driftGrip:     0.30 * Math.pow(11 / (11 + 1.0 * l("grip")), 0.85),
     driftYawBoost: 0.85,  // extra low-speed yaw authority while sliding
     driftLatScale: 2.0,   // lat-accel budget multiplier for drift rotation
     driftAttack:   14,    // 1/s: how fast grip drops when handbrake pressed
@@ -79,8 +101,14 @@ export function carParams(levels = ZERO_LEVELS) {
     boostSlipMin:  0.20,  // rad (~11.5 deg) slip needed for charge to build
     boostYawMin:   0.40,  // rad/s of yaw needed (genuine cornering, not a wiggle)
     boostSteerMin: 0.25,  // steering input needed, toward the turn
-    boostSpeedFrac: 0.42, // charge only above this fraction of top speed
-    boostFireSpeedFrac: 0.35, // release below this fraction of top speed = no boost
+    // Speed gates on charging and firing. ABSOLUTE px/s, not fractions of top
+    // speed (which is what they used to be, at 0.42 / 0.35 of the stock 280 —
+    // these are those numbers). A corner has the speed it has: tying the gate
+    // to top speed meant buying Top Speed could stop you charging a drift you
+    // used to charge, i.e. an upgrade that took the boost away. Absolute floors
+    // keep every drift you have already learned to do.
+    boostSpeedMin: 118,   // px/s: charge only above this
+    boostFireSpeedMin: 98, // px/s: releasing slower than this fires nothing
     boostDecay:    2.5,   // 1/s charge decay while conditions unmet (2.5x build)
     // Tier thresholds are shorter in v3 than v2's 0.6/1.4: the hairpin arc
     // only lasts ~1 s at drift speed, and tier 2 has to be bankable in the
@@ -92,10 +120,20 @@ export function carParams(levels = ZERO_LEVELS) {
     // of top speed, and the boost is what buys that speed back — so tier 2 is
     // now a genuine event: half again your top speed, for the best part of two
     // seconds, arriving with a ~0.9 g shove.
-    boostAmt1:     0.28,  // tier 1: +28% top speed...
-    boostDur1:     1.1,   // ...for 1.1 s
-    boostAmt2:     0.45,  // tier 2: +45% top speed...
-    boostDur2:     1.7,   // ...for 1.7 s
+    //
+    // BOOST POWER (boostPwr) scales both tiers' speed bonus, BOOST DURATION
+    // (boostDur) scales both tiers' time. Both are genuine driving upgrades:
+    // they flow through this state machine, so the bots — who drive your car —
+    // get them too, and PRO+ (the only tier that drifts) is the one they move.
+    boostAmt1:     0.28 * (1 + 0.09 * l("boostPwr")),  // tier 1: +28% top speed...
+    boostDur1:     1.1  * (1 + 0.10 * l("boostDur")),  // ...for 1.1 s
+    boostAmt2:     0.45 * (1 + 0.09 * l("boostPwr")),  // tier 2: +45% top speed...
+    boostDur2:     1.7  * (1 + 0.10 * l("boostDur")),  // ...for 1.7 s
+    // Un-upgraded tier-1 length. The bots' drift-zone ANALYSER plans against
+    // this rather than against boostDur1, so buying boost duration can never
+    // disqualify a corner it used to slide (which would be an upgrade that
+    // makes you slower — see the monotonicity invariant).
+    boostDurRef:   1.1,
     boostAccel:    880,   // px/s^2 shove toward the boosted cap while active
     boostBleed:    260,   // px/s^2 the leftover overspeed bleeds off afterwards
 
@@ -105,7 +143,7 @@ export function carParams(levels = ZERO_LEVELS) {
     offRoadCap:  0.73,    // top-speed fraction off-road
     offRoadAccelScale: 1, // no stacked accel penalty
 
-    payoutMult: 1 + 0.3 * l.payout,
+    payoutMult: 1 + 0.3 * l("payout"),
 
     // v0 physics emulation for before/after benchmarking (test harness only).
     legacy: false,
@@ -115,12 +153,13 @@ export function carParams(levels = ZERO_LEVELS) {
 // Legacy (v0) constants for baseline measurement in the test harness.
 export function legacyParams(levels = ZERO_LEVELS) {
   const p = carParams(levels);
+  const l = k => levels[k] || 0;
   p.legacy = true;
-  p.accel = 300 * (1 + 0.12 * levels.accel);
-  p.brake = 520 * (1 + 0.08 * levels.accel);
+  p.accel = 300 * (1 + 0.12 * l("accel"));
+  p.brake = 520 * (1 + 0.08 * l("accel"));
   p.rollDrag = 0.7;
-  p.latGrip = 8 + 1.2 * levels.grip;
-  p.maxTurn = 3.2 + 0.14 * levels.grip;
+  p.latGrip = 8 + 1.2 * l("grip");
+  p.maxTurn = 3.2 + 0.14 * l("grip");
   p.steerRampUp = 120;    // effectively instant (digital input)
   p.steerRampDown = 120;
   p.offRoadDrag = 3.5;
@@ -226,7 +265,7 @@ export function stepCar(car, inputs, p, dt) {
       Math.abs(car.yawRate) > p.boostYawMin &&       // genuinely cornering
       Math.abs(car.steer) > p.boostSteerMin &&       // steering applied...
       car.steer * slipSigned < 0 &&                  // ...into the turn
-      spNow > p.topSpeed * p.boostSpeedFrac &&       // at real speed
+      spNow > p.boostSpeedMin &&                     // at real speed
       vf > 0;                                        // and moving forward
     if (qualifying) car.driftCharge += dt;
     else car.driftCharge = Math.max(0, car.driftCharge - p.boostDecay * dt);
@@ -235,7 +274,7 @@ export function stepCar(car, inputs, p, dt) {
         : car.driftCharge >= p.boostTier1 ? 1 : 0;
     }
   } else {
-    const fastEnough = spNow > p.topSpeed * p.boostFireSpeedFrac;
+    const fastEnough = spNow > p.boostFireSpeedMin;
     if (car.driftCharge >= p.boostTier2 && fastEnough) {
       car.boostTime = p.boostDur2; car.boostAmt = p.boostAmt2; car.boostTier = 2;
     } else if (car.driftCharge >= p.boostTier1 && fastEnough) {
@@ -254,7 +293,14 @@ export function stepCar(car, inputs, p, dt) {
     (inputs.offRoad ? p.offRoadCap : 1);
   if (vf < cap) vf = Math.min(cap, vf + (inputs.throttle || 0) * p.accel * accelScale * dt);
   if (car.boostTime > 0) {
-    if (vf < cap) vf = Math.min(cap, vf + p.boostAccel * dt);
+    // THE BRAKE OVERRIDES THE BOOST SHOVE. The shove (880 px/s^2) is more than
+    // twice the brakes (400), so while a boost is lit a braking car would still
+    // ACCELERATE — which made a fired boost impossible to slow down for the
+    // next corner, and turned "buy a longer/stronger boost" into "get carried
+    // off the road", i.e. an upgrade that makes you worse. Braking now simply
+    // stops the shove (the burst keeps its remaining time, so lifting for a
+    // corner costs the boost's help, never control of the car).
+    if (vf < cap && !(inputs.brake > 0)) vf = Math.min(cap, vf + p.boostAccel * dt);
     car.boostTime -= dt;
     if (car.boostTime <= 0) { car.boostTime = 0; car.boostAmt = 0; }
   }

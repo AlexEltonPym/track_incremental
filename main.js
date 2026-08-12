@@ -22,6 +22,15 @@ const MAX_LAP_TICKS = 60 * 300;   // abort recording after 5 minutes
 // untouched — your best single lap still becomes the earning ghost, which
 // loops forever and pays per loop.
 const RACE_LAPS = 3;
+
+// ---------------------------------------------------------------- persistence
+// PROTOTYPING MODE. With PERSISTENCE = false the game never reads or writes
+// localStorage and actively CLEARS any trackcrimental_* keys at boot, so every
+// refresh starts from a clean slate: zero credits, zero upgrade levels, no best
+// lap, no earning ghost, default zoom and toggles. The save/load code below is
+// intact and correct — flip this one constant back to true to restore saving.
+const PERSISTENCE = false;
+
 const SAVE_KEY = "trackcrimental_v4";
 // Wiped: old physics/track = old ghosts and times invalid (v4: the v3 circuit
 // with its tight hairpin plus the buffed drift boost changed both the lap
@@ -63,11 +72,28 @@ const ctx = canvas.getContext("2d");
 
 // ---------------------------------------------------------------- upgrades
 
+// `drives: true` marks an upgrade that changes how the CAR behaves — the ones
+// the bots inherit (they drive your car) and the ones test/drive_bot.mjs sweeps
+// for the ordering/monotonicity invariants. The economy upgrades below it are
+// deliberately excluded from that regime: they cannot make anyone quicker.
 const UPGRADES = [
-  { id: "speed",  name: "Top Speed",    baseCost: 50, growth: 1.6, desc: lvl => `+${lvl * 10}% max speed` },
-  { id: "accel",  name: "Acceleration", baseCost: 40, growth: 1.6, desc: lvl => `+${lvl * 12}% accel` },
-  { id: "grip",   name: "Grip",         baseCost: 45, growth: 1.6, desc: lvl => `+${lvl} handling` },
-  { id: "payout", name: "Lap Payout",   baseCost: 60, growth: 1.7, desc: lvl => `x${(1 + lvl * 0.3).toFixed(1)} credits` },
+  { id: "speed",  name: "Top Speed",    baseCost: 50, growth: 1.6, drives: true,
+    desc: lvl => `+${lvl * 10}% max speed, +${(lvl * 2.6).toFixed(0)}% brakes` },
+  { id: "accel",  name: "Acceleration", baseCost: 40, growth: 1.6, drives: true,
+    desc: lvl => `+${lvl * 12}% accel, +${lvl * 8}% brakes` },
+  { id: "grip",   name: "Grip",         baseCost: 45, growth: 1.6, drives: true,
+    desc: lvl => `+${lvl} handling` },
+  { id: "boostPwr", name: "Boost Power", baseCost: 90, growth: 1.65, drives: true,
+    desc: lvl => `drift boost +${lvl * 9}% stronger` },
+  { id: "boostDur", name: "Boost Duration", baseCost: 80, growth: 1.65, drives: true,
+    desc: lvl => `drift boost +${lvl * 10}% longer` },
+  { id: "payout", name: "Lap Payout",   baseCost: 60, growth: 1.7,
+    desc: lvl => `x${(1 + lvl * 0.3).toFixed(1)} credits` },
+  // The big income multiplier: every extra ghost replays your best lap on the
+  // same loop and pays the same as the first, so income scales linearly with
+  // the level while the price scales by 7x — buying the third one is a project.
+  { id: "ghosts", name: "Ghost Fleet",  baseCost: 400, growth: 7,
+    desc: lvl => `${lvl + 1} earning ghost${lvl ? "s" : ""} (x${lvl + 1} income)` },
 ];
 
 function upgradeCost(u, lvl) {
@@ -78,7 +104,7 @@ function upgradeCost(u, lvl) {
 
 const state = {
   currency: 0,
-  levels: { speed: 0, accel: 0, grip: 0, payout: 0 },
+  levels: { speed: 0, accel: 0, grip: 0, boostPwr: 0, boostDur: 0, payout: 0, ghosts: 0 },
   bestTicks: null,      // best lap length in physics ticks
   ghostRec: null,       // best lap samples: [[x, y, angle], ...] one per tick
   ghostIndex: 0,
@@ -197,6 +223,7 @@ function resetCar() {
 // ---------------------------------------------------------------- save/load
 
 function save() {
+  if (!PERSISTENCE) return;
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       version: SAVE_VERSION,
@@ -214,6 +241,18 @@ function save() {
 
 function load() {
   try {
+    if (!PERSISTENCE) {
+      // Prototyping mode: leave no trace and inherit none. Every
+      // trackcrimental_* key goes, including this version's, so a stale save
+      // written before the flag was flipped cannot leak into a fresh run.
+      const doomed = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("trackcrimental_")) doomed.push(k);
+      }
+      for (const k of doomed) localStorage.removeItem(k);
+      return;
+    }
     // Physics changed: old saves' ghost times are invalid. Wipe them.
     for (const k of OLD_SAVE_KEYS) localStorage.removeItem(k);
     const raw = localStorage.getItem(SAVE_KEY);
@@ -242,6 +281,16 @@ function ghostLapSeconds() { return state.bestTicks / 60; }
 function ghostPayout() {
   // Faster laps pay more per lap (and also loop more often).
   return Math.max(1, Math.round((60 / ghostLapSeconds()) * 12)) * params.payoutMult;
+}
+
+// How many earning ghosts are on track (Ghost Fleet Lv0 = the original one).
+function ghostCount() { return 1 + state.levels.ghosts; }
+
+// Playback index of earning ghost `k`, staggered evenly around the lap so the
+// fleet is spread out rather than stacked on top of each other.
+function ghostSampleIndex(k) {
+  const len = state.ghostRec.length;
+  return (state.ghostIndex + Math.round(k * len / ghostCount())) % len;
 }
 
 // ---------------------------------------------------------------- input
@@ -370,11 +419,20 @@ function physicsStep() {
   }
 
   // ---- ghost playback + income ----
+  // The fleet all replays the SAME best-lap recording, each offset by a fixed
+  // slice of the lap, and each pays a full lap's credits when its own offset
+  // playhead wraps the line — so income is exactly ghostCount() x the single
+  // ghost's rate, but arrives in evenly spaced instalments rather than one
+  // lump. (Ghosts are income and decoration only: they never collide.)
   if (state.ghostRec) {
-    state.ghostIndex++;
-    if (state.ghostIndex >= state.ghostRec.length) {
-      state.ghostIndex = 0;
-      state.currency += ghostPayout();
+    const len = state.ghostRec.length;
+    const n = ghostCount();
+    const prev = state.ghostIndex;
+    state.ghostIndex = (state.ghostIndex + 1) % len;
+    const pay = ghostPayout();
+    for (let k = 0; k < n; k++) {
+      const off = Math.round(k * len / n);
+      if ((prev + off) % len > (state.ghostIndex + off) % len) state.currency += pay;
     }
   }
 
@@ -590,10 +648,13 @@ function renderWorld() {
     }
   }
 
-  // Ghost car.
+  // Earning ghost fleet: your best lap, replayed `ghostCount()` times over,
+  // spread evenly around the circuit. The lead ghost is the brightest.
   if (state.ghostRec) {
-    const g = state.ghostRec[Math.min(state.ghostIndex, state.ghostRec.length - 1)];
-    drawCar(g[0], g[1], g[2], 0.38, "#cfe8ff");
+    for (let k = ghostCount() - 1; k >= 0; k--) {
+      const g = state.ghostRec[ghostSampleIndex(k)];
+      drawCar(g[0], g[1], g[2], k === 0 ? 0.38 : 0.26, k === 0 ? "#cfe8ff" : "#9fd0f5");
+    }
   }
 
   // Boost flames: flickering rectangles trailing the car while boosting.
@@ -684,14 +745,16 @@ function renderMinimap() {
     }
   }
 
-  // Ghost dot.
+  // Ghost fleet dots.
   if (state.ghostRec) {
-    const g = state.ghostRec[Math.min(state.ghostIndex, state.ghostRec.length - 1)];
-    const gp = mmPoint(g[0], g[1]);
-    ctx.fillStyle = "#8fc3f0";
-    ctx.beginPath();
-    ctx.arc(gp[0], gp[1], 2.5, 0, Math.PI * 2);
-    ctx.fill();
+    for (let k = 0; k < ghostCount(); k++) {
+      const g = state.ghostRec[ghostSampleIndex(k)];
+      const gp = mmPoint(g[0], g[1]);
+      ctx.fillStyle = k === 0 ? "#8fc3f0" : "#6b9ec6";
+      ctx.beginPath();
+      ctx.arc(gp[0], gp[1], k === 0 ? 2.5 : 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   // Player: small heading triangle (map stays north-up while the camera rotates).
@@ -780,10 +843,11 @@ function buildUpgradePanel() {
         state.currency -= cost;
         state.levels[u.id]++;
         params = carParams(state.levels);
-        // The bots drive your car, so a spec change re-plans and re-simulates
-        // their whole race (a few tens of ms) and their HUD times move too.
+        // The bots drive your car, so a DRIVING spec change re-plans and
+        // re-simulates their whole race (a few tens of ms) and their HUD times
+        // move too. Economy upgrades touch nothing they care about.
         const before = botGhosts.map(g => g.bestFlying);
-        refreshBotField();
+        if (u.drives) refreshBotField();
         const moved = botGhosts.some((g, i) => g.bestFlying !== before[i]);
         flashMsg(`${u.name} → Lv ${state.levels[u.id]}` +
           (moved ? " — bots re-simulated on the new spec." : ""));
@@ -812,8 +876,9 @@ function updatePanel() {
   el("currency").textContent = Math.floor(state.currency).toLocaleString();
   if (state.bestTicks !== null) {
     const pay = ghostPayout();
-    el("payout").textContent = `${Math.round(pay)} / lap`;
-    el("income").textContent = `${Math.round(pay * 60 / ghostLapSeconds())} / min`;
+    const n = ghostCount();
+    el("payout").textContent = `${Math.round(pay)} / lap` + (n > 1 ? ` x${n}` : "");
+    el("income").textContent = `${Math.round(n * pay * 60 / ghostLapSeconds())} / min`;
   } else {
     el("payout").textContent = "–";
     el("income").textContent = "–";

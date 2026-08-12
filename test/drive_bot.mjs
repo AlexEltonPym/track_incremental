@@ -18,9 +18,11 @@
 
 import {
   TICK, G_PX, carParams, legacyParams, createCarState, stepCar, slipAngle,
-  ZERO_LEVELS,
+  ZERO_LEVELS, DRIVING_UPGRADES,
 } from "../physics.js";
-import { SKILLS, runBot, recordRace, deriveDriftZones } from "../bots.js";
+import {
+  SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
+} from "../bots.js";
 import * as T from "../track.js";
 
 // ---------------------------------------------------------------- scripted feature tests
@@ -185,6 +187,151 @@ function printRun(m, perLap = true) {
 }
 
 function pad(s, w) { s = String(s); return s.length >= w ? s : s + " ".repeat(w - s.length); }
+function padL(s, w) { s = String(s); return s.length >= w ? s : " ".repeat(w - s.length) + s; }
+
+// ------------------------------------------------ the upgrade-space sweep
+//
+// THE INVARIANTS. The bots drive the player's car, so every claim the game
+// makes about them has to survive the whole upgrade space, not just the stock
+// spec. Two properties, checked at every sampled combination of the DRIVING
+// upgrades (speed / accel / grip / boostPwr / boostDur — Lap Payout and Ghost
+// Fleet are economy only and cannot make anyone quicker, so they are excluded
+// by construction: the sweep only knows about DRIVING_UPGRADES):
+//
+//   (a) ORDERING     proplus < pro < mid < novice, on best flying lap.
+//   (b) MONOTONICITY buying one more level of ANY driving upgrade never makes
+//                    a bot slower.
+//
+// Sampling: every upgrade alone at 3/7/12/20, several mixed edge cases (one
+// stat maxed with the rest near zero, all-high, all-max) and a seeded random
+// sample of the 21^5 space. Each combo also evaluates its five +1 neighbours,
+// memoised, so the ~30 printed rows cost ~90 distinct simulated specs.
+//
+// Noise: MID/PRO/PRO+ are deterministic (steerNoise ~ 0), so their times are
+// exact and the tolerance is tight. NOVICE is a deliberately sloppy driver
+// whose per-seed spread is ~1.5-3%, so its time is the MEDIAN of five seeds
+// and its tolerance is correspondingly wider. Neither tolerance is a licence
+// to be slower — the sweep prints every violation with its combo, tier and
+// upgrade so a regression names itself.
+const SWEEP_SEEDS = 5;          // seeds averaged for a noisy tune
+const SWEEP_TOL = { novice: 0.03, mid: 0.01, pro: 0.01, proplus: 0.01 };
+const SWEEP_MAX = 20;
+
+function sweepCombos() {
+  const out = [];
+  const push = o => out.push(Object.fromEntries(DRIVING_UPGRADES.map(k => [k, o[k] || 0])));
+  push({});
+  for (const u of DRIVING_UPGRADES) for (const v of [3, 7, 12, 20]) push({ [u]: v });
+  push({ speed: 20, accel: 2, grip: 2 });
+  push({ speed: 2, accel: 20, grip: 2 });
+  push({ speed: 2, accel: 2, grip: 20 });
+  push({ speed: 20, accel: 20, grip: 0 });
+  push({ speed: 0, accel: 20, grip: 20 });
+  push({ speed: 20, accel: 0, grip: 20 });
+  push({ speed: 10, accel: 10, grip: 10, boostPwr: 10, boostDur: 10 });
+  push({ speed: 20, accel: 20, grip: 20, boostPwr: 20, boostDur: 20 });
+  const rng = mulberry32(20250812);
+  for (let i = 0; i < 8; i++) {
+    const o = {};
+    for (const u of DRIVING_UPGRADES) o[u] = Math.floor(rng() * (SWEEP_MAX + 1));
+    push(o);
+  }
+  return out;
+}
+
+function upgradeSweep() {
+  const t0 = Date.now();
+  const tiers = [["novice", "novice"], ["mid", "expert"], ["pro", "pro"],
+    ["proplus", "proplus"]];
+  const cache = new Map();
+  const specKey = lv => DRIVING_UPGRADES.map(k => lv[k] || 0).join(",");
+  const at = lv => {
+    const key = specKey(lv);
+    if (cache.has(key)) return cache.get(key);
+    const p = carParams(lv);
+    const row = { params: p, zones: deriveDriftZones(p, SKILLS.proplus).zones };
+    for (const [tier, skillName] of tiers) {
+      const sk = SKILLS[skillName];
+      const seeds = sk.steerNoise > 0.01 ? SWEEP_SEEDS : 1;
+      const runs = [];
+      for (let i = 0; i < seeds; i++) {
+        const r = raceBest(i ? { ...sk, seed: sk.seed + i * 97 } : sk, p, { laps: 3 });
+        if (r) runs.push(r);
+      }
+      const metric = process.env.TC_METRIC === "total"
+        ? r => r.totalTicks * TICK / 3 : r => r.bestFlyingTicks * TICK;
+      const times = runs.map(metric).sort((a, b) => a - b);
+      row[tier] = {
+        // A tune that cannot string three clean laps together on a majority of
+        // seeds counts as a failure, not as a slow lap.
+        lap: runs.length >= Math.ceil(seeds * 0.6) ? times[(times.length - 1) >> 1] : null,
+        valid: runs.length, seeds,
+        offRoad: runs.length ? runs[0].offRoadTicks * TICK : 0,
+        drifts: runs.length ? runs[0].handbrakeTicks : 0,
+      };
+    }
+    cache.set(key, row);
+    return row;
+  };
+
+  const rows = [];
+  const ordFails = [], monFails = [], invalid = [];
+  let worstMon = 0;
+  for (const combo of sweepCombos()) {
+    const here = at(combo);
+    const lap = t => here[t].lap;
+    for (const [tier] of tiers) {
+      if (lap(tier) === null) invalid.push(`${specKey(combo)} ${tier} could not race 3 clean laps`);
+    }
+    for (const [a, b] of [["proplus", "pro"], ["pro", "mid"], ["mid", "novice"]]) {
+      if (lap(a) !== null && lap(b) !== null && lap(a) >= lap(b)) {
+        ordFails.push(`${specKey(combo)}: ${a} ${lap(a).toFixed(2)}s >= ${b} ${lap(b).toFixed(2)}s`);
+      }
+    }
+    for (const u of DRIVING_UPGRADES) {
+      if ((combo[u] || 0) >= SWEEP_MAX) continue;
+      const up = at({ ...combo, [u]: (combo[u] || 0) + 1 });
+      for (const [tier] of tiers) {
+        const a = lap(tier), b = up[tier].lap;
+        if (a === null) continue;
+        if (b === null) {
+          monFails.push(`${specKey(combo)}: ${tier} ${u}+1 stopped completing the race`);
+          continue;
+        }
+        const pct = 100 * (b - a) / a;
+        if (b > a * (1 + SWEEP_TOL[tier])) {
+          if (pct > worstMon) worstMon = pct;
+          monFails.push(`${specKey(combo)}: ${tier} got SLOWER buying ${u} ` +
+            `(Lv ${combo[u] || 0}->${(combo[u] || 0) + 1}): ${a.toFixed(2)}s -> ${b.toFixed(2)}s (+${pct.toFixed(1)}%)`);
+        } else if (pct > worstMon) worstMon = Math.max(worstMon, 0);
+      }
+    }
+    rows.push([combo, here]);
+  }
+
+  console.log("\nUpgrade-space sweep — the bots drive YOUR car, so the ladder and");
+  console.log("the 'an upgrade is never a downgrade' rule are checked across it.");
+  console.log(`  driving upgrades: ${DRIVING_UPGRADES.join(", ")}` +
+    "   (Lap Payout / Ghost Fleet are economy only and excluded)");
+  console.log("  " + pad("sp,ac,gr,bp,bd", 16) + padL("novice", 9) + padL("mid", 9) +
+    padL("pro", 9) + padL("proplus", 9) + "  " + pad("top", 6) + pad("PRO+ drift plan", 26));
+  for (const [combo, here] of rows) {
+    const zones = here.zones.map(z =>
+      `${z.why[0]}${(100 * z.from).toFixed(0)}-${(100 * z.to).toFixed(0)}`).join(" ") || "-";
+    console.log("  " + pad(specKey(combo), 16) +
+      tiers.map(([t]) => padL(here[t].lap === null ? "FAIL" : here[t].lap.toFixed(2), 9)).join("") +
+      "  " + pad(here.params.topSpeed.toFixed(0), 6) + pad(zones, 26));
+  }
+  const dt = Date.now() - t0;
+  console.log(`  ${cache.size} distinct specs simulated in ${(dt / 1000).toFixed(1)}s` +
+    `  |  ordering violations ${ordFails.length}` +
+    `  |  monotonicity violations ${monFails.length}` +
+    (monFails.length ? ` (worst +${worstMon.toFixed(1)}%)` : "") +
+    `  |  tolerance novice ${100 * SWEEP_TOL.novice}% (median of ${SWEEP_SEEDS} seeds), others ${100 * SWEEP_TOL.mid}%`);
+  for (const m of [...invalid, ...ordFails, ...monFails]) console.log(`    ! ${m}`);
+  return { ordFails, monFails, invalid, worstMon, cache, at, specKey, tiers };
+}
+
 
 function acceptance(results) {
   const nov = results.novice, exp = results.expert;
@@ -234,7 +381,9 @@ function acceptance(results) {
     ["pro", "pro"], ["proplus", "proplus"]];
   const races = {};
   for (const [ghost, skillName] of RACE_TIERS) {
-    races[ghost] = recordRace(SKILLS[skillName], p, { laps: 3 });
+    // raceBest, not recordRace: this is exactly what the game grids up, so a
+    // drift-capable tier is gated on the strategy it actually races.
+    races[ghost] = raceBest(SKILLS[skillName], p, { laps: 3 });
   }
   const proRec = races.pro, ppRec = races.proplus;
   const proMargin = proRec ? edgeMargin(proRec) : -Infinity;
@@ -271,49 +420,17 @@ function acceptance(results) {
       ` at ${T.sectorAt(proRec.minSpeedFrac)}`);
   }
 
-  // ---- upgrade scaling ----
-  // The bots drive the PLAYER'S CURRENT car, so every preset has to survive
-  // the whole upgrade curve, not just the stock spec. Simulate the reference
-  // field at several upgrade levels and require that each tier still strings
-  // three valid laps together and that the skill ladder still holds. This is
-  // the regression gate on the speed-scaled parts of the controller (the
-  // reach of the brake planner, the yaw-rate corner limit, the reaction-
-  // limited pace cap) and on the derived drift zones.
-  const SCALE_LEVELS = [5, 10];
-  const scale = {};
-  console.log("\nUpgrade scaling (bots drive the player's upgraded car):");
-  for (const lvl of SCALE_LEVELS) {
-    const sp = carParams({ speed: lvl, accel: lvl, grip: lvl, payout: 0 });
-    const zones = deriveDriftZones(sp, SKILLS.proplus).zones;
-    const row = {};
-    for (const [ghost, skillName] of RACE_TIERS) {
-      row[ghost] = recordRace(SKILLS[skillName], sp, { laps: 3 });
-    }
-    scale[lvl] = row;
-    console.log(`  Lv ${lvl} (top ${sp.topSpeed.toFixed(0)} px/s, latAcc ` +
-      `${sp.maxLatAccel}, maxTurn ${sp.maxTurn.toFixed(2)}): PRO+ drift plan = ` +
-      (zones.map(z => `${z.why} ${(100 * z.from).toFixed(0)}-${(100 * z.to).toFixed(0)}%`)
-        .join(", ") || "(none)"));
-    for (const [ghost] of RACE_TIERS) {
-      const r = row[ghost];
-      console.log("    " + pad(ghost, 9) + (r
-        ? `${pad(f(r.bestFlyingTicks * TICK) + "s fly", 12)}` +
-          `${pad(f(r.totalTicks * TICK) + "s race", 13)}` +
-          `${pad("margin " + f(edgeMargin(r), 1), 14)}` +
-          `off-road ${f(r.offRoadTicks * TICK)}s`
-        : "FAILED — no 3 valid laps"));
-    }
-  }
-  const scaleValid = lvl => RACE_TIERS.every(([g]) =>
-    scale[lvl][g] && scale[lvl][g].lapTicks.length === 3);
-  const scaleLadder = lvl => scaleValid(lvl) &&
-    scale[lvl].proplus.bestFlyingTicks < scale[lvl].pro.bestFlyingTicks &&
-    scale[lvl].pro.bestFlyingTicks < scale[lvl].mid.bestFlyingTicks &&
-    scale[lvl].mid.bestFlyingTicks < scale[lvl].novice.bestFlyingTicks;
-  // ...and the upgrades have to actually make the bots faster, or "the bots
-  // mirror your car" is a lie.
-  const scaleFaster = SCALE_LEVELS.every(lvl => scaleValid(lvl) &&
-    RACE_TIERS.every(([g]) => scale[lvl][g].bestFlyingTicks < races[g].bestFlyingTicks));
+  // ---- the upgrade-space sweep ----
+  const sweep = upgradeSweep();
+  // ...and the headline promise: buying levels genuinely moves every tier's
+  // lap time, or "the bots mirror your car" is decoration. Checked at a mid
+  // and a high uniform spec against the stock car.
+  const stockRow = sweep.at({});
+  const sweepFaster = [7, 14].every(lvl => {
+    const row = sweep.at(Object.fromEntries(DRIVING_UPGRADES.map(k => [k, lvl])));
+    return sweep.tiers.every(([t]) => row[t].lap !== null && stockRow[t].lap !== null &&
+      row[t].lap < stockRow[t].lap);
+  });
 
   const checks = [
     ["novice completes >= 8/10 valid laps", nov.validLaps >= 8],
@@ -390,12 +507,14 @@ function acceptance(results) {
       proRec !== null && proMargin >= 8],
     ["proplus 3-lap race stays >= 3 px inside the road edge",
       ppRec !== null && ppMargin >= 3],
-    // ---- upgrade scaling (bots race the player's upgraded spec) ----
-    [`every reference bot still strings 3 valid laps at upgrade Lv ${SCALE_LEVELS.join("/")}`,
-      SCALE_LEVELS.every(scaleValid)],
-    [`tier ladder still holds at upgrade Lv ${SCALE_LEVELS.join("/")} (proplus < pro < mid < novice)`,
-      SCALE_LEVELS.every(scaleLadder)],
-    ["upgrades actually make every bot faster (they drive your car)", scaleFaster],
+    // ---- the upgrade-space sweep (bots race the player's upgraded spec) ----
+    ["sweep: every bot strings 3 valid laps at every sampled upgrade combo",
+      sweep.invalid.length === 0],
+    ["sweep: ordering holds everywhere (proplus < pro < mid < novice)",
+      sweep.ordFails.length === 0],
+    ["sweep: monotonic — no driving upgrade ever makes a bot slower",
+      sweep.monFails.length === 0],
+    ["upgrades actually make every bot faster (they drive your car)", sweepFaster],
   ];
   console.log("\nAcceptance criteria:");
   let allPass = true;
