@@ -29,7 +29,7 @@ const MAX_LAP_TICKS = 60 * 300;   // abort recording after 5 minutes
 // 3-2-1-GO countdown, everyone launches from the F1 grid at GO (even with no
 // player input), and from then on the player drives forever while the four bot
 // ghosts loop their flying lap continuously as the pace reference. The lap
-// counter is an endless tally; R re-grids and re-runs the countdown.
+// counter is an endless tally; R drops you behind the line to try the lap again.
 
 // Countdown length: 3 s of "3 / 2 / 1", one second each, then GO.
 const COUNTDOWN_TICKS = 3 * 60;
@@ -155,6 +155,7 @@ const state = {
   phase: "menu",        // "menu" (start screen) | "countdown" | "racing"
   countdown: 0,         // ticks left in the 3-2-1 countdown
   goFlash: 0,           // ticks of the on-canvas "GO!" flash remaining
+  countedIn: new Set(), // tracks that have had their one-time grid countdown
 };
 
 let params = carParams(state.drivingLevels);
@@ -228,6 +229,37 @@ function updateRefLaps() {
 
 const marks = [];       // fading tire marks: {x1,y1,x2,y2,born,tier}
 let lastRear = null;    // previous rear-wheel positions for mark segments
+
+// Faint drift marks laid by REPLAYED cars — the bots (PRO+ slides) and your
+// earning ghosts (whatever you drifted on that recorded lap). There is no
+// drift flag in the samples, so it is inferred from the motion: when a car's
+// travel direction diverges from its heading, it is sliding. Fainter than the
+// player's own rubber. Only the active track's replays lay them.
+const ghostMarks = [];
+const GHOST_MARK_MAX = 1400;
+const GHOST_SLIP = 0.28;          // rad of slip before a replay counts as sliding
+const GHOST_MARK_MIN_SPEED = 70;  // px/s — ignore near-stationary jitter
+const GHOST_MARK_MAX_SPEED = 900; // px/s — skip loop-seam teleport jumps
+const earnRear = [];              // previous rear per active-track earning ghost
+
+function driftMarkFor(store, key, x, y, angle, prevX, prevY) {
+  const dx = x - prevX, dy = y - prevY;
+  const speed = Math.hypot(dx, dy) / TICK;
+  const sliding = speed > GHOST_MARK_MIN_SPEED && speed < GHOST_MARK_MAX_SPEED &&
+    Math.abs(angDiff(Math.atan2(dy, dx), angle)) > GHOST_SLIP;
+  if (!sliding) { store[key] = null; return; }
+  const bx = x - Math.cos(angle) * 8, by = y - Math.sin(angle) * 8;
+  const ox = -Math.sin(angle) * 5, oy = Math.cos(angle) * 5;
+  const rear = [bx + ox, by + oy, bx - ox, by - oy];
+  const last = store[key];
+  if (last) {
+    const born = state.totalTicks;
+    ghostMarks.push({ x1: last[0], y1: last[1], x2: rear[0], y2: rear[1], born });
+    ghostMarks.push({ x1: last[2], y1: last[3], x2: rear[2], y2: rear[3], born });
+    if (ghostMarks.length > GHOST_MARK_MAX) ghostMarks.splice(0, ghostMarks.length - GHOST_MARK_MAX);
+  }
+  store[key] = rear;
+}
 let wasDrifting = false;
 let boostFlash = 0;     // ticks of "BOOST!" text remaining
 let boostFlashTier = 1;
@@ -236,7 +268,8 @@ let boostFlashTier = 1;
 // straight — their recordings begin at v=0 on their own slot, so the launch
 // spreads the field into an F1 stagger. Nobody moves until GO: the START menu's
 // countdown reaches zero, `phase` becomes "racing", and everyone launches
-// together with no player input required. R re-grids and re-runs the countdown.
+// together with no player input required. R just resets you to the line; the
+// first visit to a track runs the countdown, later visits skip straight to it.
 let pendingMsg = null;      // message to show once we are back on the grid (R)
 
 function resetCar() {
@@ -253,18 +286,44 @@ function resetCar() {
   lastRear = null;
   wasDrifting = false;
   boostFlash = 0;
-  // Re-line-up the bots on the grid; they hold until GO.
-  for (const g of botGhosts) g.idx = 0;
+  // Clear all rubber and per-replay drift state (a re-grid is a clean slate).
+  marks.length = 0;
+  ghostMarks.length = 0;
+  earnRear.length = 0;
+  for (const g of botGhosts) { g.idx = 0; g._rear = null; }   // bots back on the grid
   // Teleport = snap the camera too; smoothing a reset feels like a swoop.
   camera.x = START_POS.x; camera.y = START_POS.y; camera.angle = START_ANGLE;
   camera.zoom = CAM_ZOOM_SLOW;
   camera.kickLat = 0; camera.kickRot = 0; camera.driftBias = 0; camera.pulse = 0;
 }
 
+// R: abandon the current lap ATTEMPT and drop back behind the line at rest to
+// try again — the field keeps racing (no re-grid, no countdown), your endless
+// tally is kept, and the next timed lap begins when you next cross the line.
+function resetToLine() {
+  const c = state.car;
+  c.x = START_POS.x; c.y = START_POS.y;
+  c.angle = START_ANGLE;
+  c.vx = 0; c.vy = 0;
+  c.steer = 0; c.grip = 1; c.yawRate = 0; c.drifting = false;
+  c.stopHold = 0; c.reverseArmed = true;
+  c.driftCharge = 0; c.boostTier = 0; c.boostTime = 0; c.boostAmt = 0;
+  state.lap = createLap();      // clear checkpoints + lap timer
+  state.lapRec = [];
+  lastRear = null;
+  wasDrifting = false;
+  boostFlash = 0;
+  camera.x = START_POS.x; camera.y = START_POS.y; camera.angle = START_ANGLE;
+  camera.zoom = CAM_ZOOM_SLOW;
+  camera.kickLat = 0; camera.kickRot = 0; camera.driftBias = 0; camera.pulse = 0;
+}
+
 // Start (or restart) the race: re-grid, hide the menu, run the 3-2-1 countdown.
+// Marks this track as counted-in, so returning to it later skips the ceremony.
 function startCountdown() {
   resetCar();
   hideMenu();
+  state.countedIn.add(state.currentTrack);
   state.phase = "countdown";
   state.countdown = COUNTDOWN_TICKS;
   state.goFlash = 0;
@@ -434,7 +493,10 @@ const KEYMAP = {
 
 window.addEventListener("keydown", e => {
   if (KEYMAP[e.code]) { keys[KEYMAP[e.code]] = true; e.preventDefault(); }
-  if (e.code === "KeyR") { startCountdown(); flashMsg("Back on the grid — countdown."); }
+  if (e.code === "KeyR" && state.phase === "racing") {
+    resetToLine();
+    flashMsg("Back to the line.");
+  }
   if (e.code === "KeyG") {
     state.showBotGhosts = !state.showBotGhosts;
     save();
@@ -465,6 +527,7 @@ function physicsStep() {
   // so they spread around the lap, and pays payoutFor(that lap) each time its
   // playhead wraps the line. Only the active track is drawn; the rest keep
   // running and paying (that is what makes unlocking maps grow income).
+  const activeId = state.currentTrack;
   for (const id of state.unlocked) {
     const ts = state.tracks[id];
     const n = fleetSizeFor(ts), mult = payoutMultFor(ts);
@@ -476,6 +539,14 @@ function physicsStep() {
       const nh = (h + 1) % len;
       ts.ghostHeads[k] = nh;
       if (nh < h) state.credits += payoutFor(rec.ticks, mult);   // wrapped the line
+      // Faint drift marks for the visible fleet only (the others aren't drawn).
+      if (id === activeId) {
+        if (nh < h) earnRear[k] = null;   // wrapped the line: no seam segment
+        else {
+          const cur = rec.samples[nh], prev = rec.samples[h];
+          driftMarkFor(earnRear, k, cur[0], cur[1], cur[2], prev[0], prev[1]);
+        }
+      }
     }
   }
 
@@ -581,8 +652,12 @@ function physicsStep() {
   // standing samples (0..loopStart) spread the F1 grid on launch; after that
   // each loops its flying lap (loopStart..loopStart+loopLen) forever.
   for (const g of botGhosts) {
+    const prev = g.samples[g.idx];
     g.idx++;
-    if (g.idx >= g.loopStart + g.loopLen) g.idx = g.loopStart;
+    if (g.idx >= g.loopStart + g.loopLen) { g.idx = g.loopStart; g._rear = null; }
+    const cur = g.samples[g.idx];
+    // _rear was nulled on the wrap, so no rubber is drawn across the loop seam.
+    driftMarkFor(g, "_rear", cur[0], cur[1], cur[2], prev[0], prev[1]);
   }
 }
 
@@ -756,6 +831,25 @@ function renderWorld() {
     ctx.restore();
     // Drop fully faded marks from the front.
     while (marks.length && state.totalTicks - marks[0].born > MARK_LIFE) marks.shift();
+  }
+
+  // Faint drift marks from the replayed cars (bots + earning ghosts) — same
+  // fade, thinner and much dimmer than the player's own so they read as ghostly.
+  if (ghostMarks.length) {
+    ctx.save();
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "butt";
+    for (const m of ghostMarks) {
+      const age = state.totalTicks - m.born;
+      if (age > MARK_LIFE) continue;
+      ctx.strokeStyle = `rgba(34,34,38,${(0.22 * (1 - age / MARK_LIFE)).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.moveTo(m.x1, m.y1);
+      ctx.lineTo(m.x2, m.y2);
+      ctx.stroke();
+    }
+    ctx.restore();
+    while (ghostMarks.length && state.totalTicks - ghostMarks[0].born > MARK_LIFE) ghostMarks.shift();
   }
 
   // Checkpoint gates: green if passed this lap, yellow if next, dim otherwise.
@@ -1034,9 +1128,22 @@ function switchTrack(id) {
   T.setTrack(id);
   state.currentTrack = id;
   fitMinimap();
-  marks.length = 0;             // tire marks belong to the track they were laid on
+  marks.length = 0;             // rubber belongs to the track it was laid on
+  ghostMarks.length = 0;
+  earnRear.length = 0;
   refreshBotField();
-  startCountdown();             // re-grid the new circuit and count us in
+  if (state.countedIn.has(id)) {
+    // Been here before: no ceremony. Drop behind the line ready to go (like R),
+    // and launch the freshly re-gridded bots immediately — no countdown.
+    hideMenu();
+    for (const g of botGhosts) { g.idx = 0; g._rear = null; }
+    resetToLine();
+    state.phase = "racing";
+    state.countdown = 0;
+    state.goFlash = 0;
+  } else {
+    startCountdown();           // first visit here: F1 grid + 3-2-1-GO
+  }
   updateTrackButtons();
   save();
   const meta = TRACKS.find(t => t.id === id);
@@ -1244,7 +1351,7 @@ requestAnimationFrame(frame);
 
 // Debug/test hook (used by automated verification; harmless in play).
 window.__game = {
-  state, resetCar, save, marks, switchTrack, tryUnlock, startCountdown,
+  state, resetCar, resetToLine, save, marks, ghostMarks, switchTrack, tryUnlock, startCountdown,
   // Skip the menu/countdown straight into the race (headless verification).
   go() { hideMenu(); resetCar(); state.phase = "racing"; state.countdown = 0; state.goFlash = 0; },
   get track() { return { id: T.TRACK_ID, name: T.TRACK_NAME, len: T.TRACK_LEN,
