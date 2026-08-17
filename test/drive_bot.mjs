@@ -16,14 +16,20 @@
 //
 // Telemetry unit assumption: 10 px = 1 m, so 98.1 px/s^2 = 1 g.
 
+// ?v= matches the browser imports (see main.js): every importer of a stateful
+// module — track.js holds the active-track state — must use the IDENTICAL
+// specifier, or Node/the browser loads two separate instances and setTrack()
+// on one is invisible to the other.
 import {
   TICK, G_PX, SURFACE, carParams, legacyParams, createCarState, stepCar, slipAngle,
   ZERO_LEVELS, DRIVING_UPGRADES, UPGRADE_BY_ID, levelsForBudget,
-} from "../physics.js";
+  insertRankedLap, fleetSize, RANKED_LAPS_CAP,
+} from "../physics.js?v=6";
 import {
   SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
-} from "../bots.js";
-import * as T from "../track.js";
+  simulateBotField, BOT_TIERS,
+} from "../bots.js?v=6";
+import * as T from "../track.js?v=6";
 
 // ---------------------------------------------------------------- scripted feature tests
 
@@ -631,6 +637,116 @@ const TRACK_EXPECT = {
 //   the sweeps       the upgrade-space invariants, per track.
 //   sensitivity()    the proof that the three circuits reward different things.
 
+// ------------------------------------------------ grid + economy logic
+//
+// Light checks on the ENDLESS-model plumbing, deliberately kept out of the
+// driving sweep (grid slots, ranked-lap insertion and the fleet-buy gate do
+// not affect how the car drives — the user's requirement). Pure functions, so
+// they cost microseconds.
+
+// The F1 grid: five slots (player pole + four bots), each further back along
+// the track than the one ahead, all distinct and on the racing surface — AND,
+// the load-bearing half, the four bots' ACTUAL simulated recordings must begin
+// at their assigned slots. Testing gridSlot() in isolation is not enough: it
+// once returned correct slots that recordRace never consumed, so the field
+// launched stacked on the pole. This simulates the real field and asserts each
+// bot's sample[0] == gridSlot(tier+1), mutually distinct, on every track.
+function gridChecks(tracks) {
+  const checks = [];
+  const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 1.5;
+  for (const id of tracks) {
+    T.setTrack(id);
+    const slots = [0, 1, 2, 3, 4].map(k => T.gridSlot(k));
+    // Arc length behind the start line, per slot (the line is at arc 0).
+    const behind = slots.map(s => {
+      const i = T.nearestIndex(s.x, s.y);
+      return ((T.TRACK_LEN - T.CUMLEN[i]) % T.TRACK_LEN + T.TRACK_LEN) % T.TRACK_LEN;
+    });
+    let ordered = true, distinct = true, onRoad = true;
+    for (let k = 1; k < slots.length; k++) {
+      if (!(behind[k] > behind[k - 1] + 1)) ordered = false;   // each further back
+      const dx = slots[k].x - slots[k - 1].x, dy = slots[k].y - slots[k - 1].y;
+      if (Math.hypot(dx, dy) < 10) distinct = false;
+    }
+    for (const s of slots) if (T.surfaceAt(s.x, s.y) !== SURFACE.ROAD) onRoad = false;
+
+    // Simulate the real four-bot field and check where each recording BEGINS.
+    const field = simulateBotField(carParams(ZERO_LEVELS));
+    // Field order follows BOT_TIERS (novice, mid, pro, proplus) = slots 1..4.
+    const starts = field.map(g => g.samples[0]);
+    let startsAtSlot = field.length === 4;
+    field.forEach((g, ti) => {
+      const slot = T.gridSlot(ti + 1);
+      if (!near(g.samples[0], [slot.x, slot.y])) startsAtSlot = false;
+    });
+    let startsDistinct = true;
+    for (let a = 0; a < starts.length; a++) {
+      for (let b = a + 1; b < starts.length; b++) {
+        if (Math.hypot(starts[a][0] - starts[b][0], starts[a][1] - starts[b][1]) < 5) {
+          startsDistinct = false;
+        }
+      }
+    }
+    console.log(`  [${id}] bot grid starts: ` + field.map((g, ti) =>
+      `${g.short} (${g.samples[0][0].toFixed(0)},${g.samples[0][1].toFixed(0)})`).join("  "));
+
+    checks.push(
+      [`[${id}] grid slots are distinct and ordered pole -> 5th (each further back)`,
+        ordered && distinct],
+      [`[${id}] every grid slot sits on the racing surface`, onRoad],
+      [`[${id}] the four bot recordings actually START at their grid slots (1..4)`,
+        startsAtSlot],
+      [`[${id}] the four bot start positions are mutually distinct (no stacking on pole)`,
+        startsDistinct]);
+  }
+  return checks;
+}
+
+// The ranked-lap list stays sorted fastest-first and capped, and the fleet-size
+// gate never lets the fleet exceed the number of recorded laps.
+function economyLogicChecks() {
+  // Insert out of order; the list must come out ascending and capped.
+  const list = [];
+  const times = [1200, 900, 1500, 900, 700, 2000, 1100];
+  for (const t of times) insertRankedLap(list, { ticks: t, samples: [[0, 0, 0], [1, 1, 0]] });
+  const sorted = list.every((e, i) => i === 0 || list[i - 1].ticks <= e.ticks);
+  const best = list.length && list[0].ticks === 700;
+  // Cap: push far more than the cap and confirm it never grows past it, keeping
+  // the fastest.
+  const big = [];
+  for (let i = 0; i < RANKED_LAPS_CAP * 3; i++) {
+    insertRankedLap(big, { ticks: 500 + ((i * 37) % 1000), samples: [[0, 0, 0], [1, 1, 0]] });
+  }
+  const capped = big.length === RANKED_LAPS_CAP &&
+    big.every((e, i) => i === 0 || big[i - 1].ticks <= e.ticks);
+  // Rank returned points at where the lap landed (or -1 when too slow to fit).
+  const rankReturn = (() => {
+    const l = [{ ticks: 100 }, { ticks: 200 }];
+    const r1 = insertRankedLap(l, { ticks: 150 }, 3);          // lands at index 1
+    const r2 = insertRankedLap(l, { ticks: 999 }, 3);          // full now, too slow -> -1
+    return r1 === 1 && r2 === -1;
+  })();
+  // Fleet-size gate: never exceeds the recorded-lap count; buying is only
+  // unblocked when there is another distinct lap to fill.
+  let gateOK = true;
+  for (let lvl = 0; lvl <= 15; lvl++) {
+    for (let laps = 0; laps <= 15; laps++) {
+      const n = fleetSize(lvl, laps);
+      if (n !== Math.min(1 + lvl, laps)) gateOK = false;
+      if (n > laps) gateOK = false;
+      // The buy is unlocked exactly when there is a lap the new ghost can use.
+      const canBuy = laps > n;
+      if (canBuy && fleetSize(lvl + 1, laps) <= n) gateOK = false;
+    }
+  }
+  return [
+    ["ranked laps: insertion keeps the list sorted fastest-first", sorted && best],
+    [`ranked laps: the list is capped at ${RANKED_LAPS_CAP}, keeping the fastest`, capped],
+    ["ranked laps: insert returns the landing rank (or -1 when too slow to fit)", rankReturn],
+    ["fleet gate: fleet size never exceeds the recorded-lap count", gateOK],
+  ];
+}
+
 function physicsChecks() {
   const p = carParams(ZERO_LEVELS);
   const db = driftBoostTest(p);
@@ -952,9 +1068,13 @@ function trackChecks(results) {
       pro.bestLap < exp.bestLap && pro.handbrakeTicks === 0],
     [q("proplus best beats pro best"),
       pp.bestLap !== null && pro.bestLap !== null && pp.bestLap < pro.bestLap],
-    [q("every reference bot strings 3 valid laps together (a race is 3 laps)"),
+    // ENDLESS MODEL: the game grids everyone up, launches at GO, and the bots
+    // then loop their flying lap forever. So what has to hold is that each bot
+    // strings consecutive valid laps (the field loops these) and that a flying
+    // lap is genuinely faster than the gridded standing launch.
+    [q("every reference bot strings consecutive valid laps (the endless field loops these)"),
       RACE_TIERS.every(([g]) => races[g] && races[g].lapTicks.length === 3)],
-    [q("every bot's best FLYING lap beats its standing-start lap 1"),
+    [q("a flying lap is faster than the gridded standing launch"),
       RACE_TIERS.every(([g]) => races[g] &&
         races[g].bestFlyingTicks < races[g].lapTicks[0])],
     [q("tier ladder holds on best flying lap (proplus < pro < mid < novice)"),
@@ -1062,6 +1182,10 @@ function main() {
   }
 
   const checks = physicsChecks();
+  // Endless-model plumbing: grid slots (per track) + ranked-lap / fleet-gate
+  // logic (track-independent). Excluded from the driving sweep on purpose.
+  checks.push(...gridChecks(T.TRACKS.map(t => t.id)));
+  checks.push(...economyLogicChecks());
   const summaries = [];
   for (const meta of T.TRACKS) {
     T.setTrack(meta.id);

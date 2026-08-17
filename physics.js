@@ -263,6 +263,38 @@ export function levelsForBudget(u, budget) {
   }
 }
 
+// ---------------------------------------------------------------- economy
+//
+// Two PURE economy helpers, here (not in main.js) so the acceptance harness
+// gates the exact ranked-lap and fleet-gate logic the game runs. They touch no
+// car physics — the driving sweep excludes them by construction — but they are
+// balance the harness has to be able to check without a DOM.
+
+// Distinct lap recordings kept per track, fastest-first.
+export const RANKED_LAPS_CAP = 12;
+
+// Insert a lap recording ({ ticks, samples }) into a fastest-first ranked
+// list, keeping it sorted ascending by ticks and capped at `cap`. Every valid
+// lap is a distinct entry (no dedupe): driving more laps is exactly how you
+// unlock more earning ghosts. Mutates and returns `list`; returns the rank the
+// lap landed at, or -1 if it was too slow to make the cut.
+export function insertRankedLap(list, entry, cap = RANKED_LAPS_CAP) {
+  let i = list.findIndex(e => entry.ticks < e.ticks);
+  if (i < 0) i = list.length;
+  list.splice(i, 0, entry);
+  if (list.length > cap) list.length = cap;
+  return i < cap ? i : -1;
+}
+
+// Earning-ghost fleet size: 1 + the track's Ghost Fleet level, but never more
+// than the number of distinct recorded laps available to fill it. Your best
+// lap is ghost #1 for free at Lv 0. THIS IS THE BUY GATE: a level does nothing
+// until you have another distinct lap to fill the new ghost, so the buy button
+// is disabled whenever `rankedLen <= fleetSize(lvl, rankedLen)`.
+export function fleetSize(fleetLvl, rankedLen) {
+  return Math.min(1 + fleetLvl, rankedLen);
+}
+
 // Legacy (v0) constants for baseline measurement in the test harness.
 export function legacyParams(levels = ZERO_LEVELS) {
   const p = carParams(levels);

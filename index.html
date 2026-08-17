@@ -93,17 +93,49 @@
   }
   #trackSel button:hover { background: #343c46; }
   #trackSel button.on { color: var(--accent); border-color: var(--accent); background: #343c46; }
+  #trackSel button.locked { color: var(--dim); border-style: dashed; }
+  #trackSel button.locked:not(:disabled) { color: var(--accent); }
+  #trackSel button:disabled { opacity: 0.5; cursor: default; }
+  .ugroup { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--dim); margin: 8px 0 4px; }
+  .ugroup:first-child { margin-top: 0; }
   #help { font-size: 12px; color: var(--dim); line-height: 1.5; }
   #msg { min-height: 18px; font-size: 12px; color: var(--good); margin-top: 6px; }
+  /* Start-screen overlay, positioned over the canvas. Dark panel style. */
+  #stage { position: relative; }
+  #startOverlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px;
+    background: rgba(12, 14, 17, 0.82);
+    border-radius: 6px;
+  }
+  #startOverlay h2 {
+    font-size: 40px; letter-spacing: 3px; color: var(--accent);
+    margin: 0; text-transform: none;
+  }
+  #goBtn {
+    background: #2a3038; color: var(--accent);
+    border: 2px solid var(--accent); border-radius: 8px;
+    padding: 14px 54px; font-size: 26px; font-weight: 700; letter-spacing: 2px;
+    cursor: pointer;
+  }
+  #goBtn:hover { background: #343c46; }
 </style>
 </head>
 <body>
-  <canvas id="game" width="960" height="620"></canvas>
+  <div id="stage">
+    <canvas id="game" width="960" height="620"></canvas>
+    <div id="startOverlay">
+      <h2>TRACKCRIMENTAL</h2>
+      <button id="goBtn">GO</button>
+    </div>
+  </div>
   <div id="panel">
     <h1>TRACKCRIMENTAL</h1>
     <div class="stat-row"><span class="label">Track</span><span class="value" id="trackName">–</span></div>
     <div id="trackSel"></div>
-    <div class="stat-row"><span class="label">Lap</span><span class="value" id="raceLap">– / 3</span></div>
+    <div class="stat-row"><span class="label">Laps</span><span class="value" id="raceLap">–</span></div>
     <div class="stat-row"><span class="label">Lap time</span><span class="value" id="lapTime">–</span></div>
     <div class="stat-row"><span class="label">Best lap</span><span class="value" id="bestTime">–</span></div>
     <div class="stat-row"><span class="label">Checkpoints</span><span class="value" id="cpStatus">–</span></div>
@@ -120,13 +152,13 @@
     <div id="help">
       <b>Drive:</b> WASD / arrows<br>
       <b>Drift (handbrake):</b> Space or Shift<br>
-      <b>Re-grid / restart the 3-lap race:</b> R<br>
+      <b>Re-grid + countdown:</b> R<br>
       <b>Bot ghosts on/off:</b> G<br>
       <b>Zoom out / in:</b> scroll wheel<br><br>
-      Your best lap becomes a ghost that loops forever, earning credits you
-      spend on upgrades — then beat it.
+      Your ranked best laps loop forever as earning ghosts. Buy upgrades, drive
+      faster laps, unlock more maps — every map's ghosts earn at once.
     </div>
   </div>
-  <script type="module" src="main.js"></script>
+  <script type="module" src="main.js?v=6"></script>
 </body>
 </html>

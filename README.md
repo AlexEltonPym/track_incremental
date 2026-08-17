@@ -1,8 +1,10 @@
 # Trackcrimental
 
-Incremental top-down 2D time-trial racer prototype. Drive laps to set a best
-time; your best lap replays forever as a ghost that earns credits, which buy
-car upgrades so you can drive an even faster lap.
+Incremental top-down 2D drift racer prototype. Line up on an F1 grid, launch at
+GO, and lap **endlessly** against a four-bot pace field. Your **ranked best
+laps** each replay forever as earning ghosts — ghost #1 is your best lap, #2
+your second best, and so on — paying credits that buy car upgrades and unlock
+more circuits, each of which then earns income at the same time.
 
 **Three circuits**, each built so a *different* upgrade is the dominant lever:
 EMBER LOOP rewards the drift boost, LONGSHORE SPEEDWAY rewards top speed,
@@ -35,12 +37,20 @@ any track*, back to the default circuit, default zoom, default toggles. That is
 deliberate: every test of a balance change starts from the same clean slate,
 and a stale save from before the change cannot leak in.
 
-The save/load code is intact and correct (**schema v5**: the selected track
-plus a `{ trackId: { bestTicks, ghostRec } }` map, so per-track records and
-ghost recordings round-trip; unknown track ids in a save are ignored, and a
-track with no entry simply starts blank). Flip the one constant back to `true`
-and saving works exactly as before — this was verified by flipping it, setting
-laps on two circuits, reloading, and flipping it back.
+The save/load code is intact and correct (**schema v6**). The shape is a clean
+split of global and per-track state:
+
+```
+{ version: 6, credits, drivingLevels: {speed,accel,grip,boostPwr,boostDur},
+  currentTrack, unlocked: [trackId, ...],
+  tracks: { trackId: { lapPayoutLvl, ghostFleetLvl,
+                       rankedLaps: [{ ticks, samples }, ...] } } }
+```
+
+so the map unlocks, the per-track economy levels and each track's **ranked list
+of best laps** (with their recordings) all round-trip; unknown track ids are
+ignored, and a track with no entry simply starts blank. Flip the one constant
+back to `true` and saving works exactly as before.
 
 ## Controls
 
@@ -61,61 +71,77 @@ laps on two circuits, reloading, and flipping it back.
   Charging requires actually cornering at speed — straight-line slides and
   handbrake stops bleed charge away instead of banking it, and the handbrake
   barely slows the car (use the brake to slow down)
-- **R** — re-grid: car back on the start line, bot ghosts re-parked, the
-  3-lap race restarted (aborts the current lap). Finishing all three laps
-  re-grids you automatically, so R is only for abandoning a race early
+- **R** — re-grid: the whole field back on the F1 grid and the **3‑2‑1‑GO
+  countdown** re-run (aborts the current lap and resets the endless lap tally)
 - **G** — toggle the NOVICE/MID/PRO/PRO+ bot reference ghosts
 - **Mouse scroll wheel** (over the track) — zoom out to survey most of the
   track, or back in (reset by a refresh while persistence is off)
 - **Track buttons** (top of the side panel: Ember / Longshore / Lantern) —
-  switch circuit. The bot field is re-simulated for that track (cached per
-  track, so flipping back is instant), the race is reset to the grid, and the
-  panel shows that circuit's own best lap and ghost payout
+  switch circuit, or **unlock** a locked one. Ember is unlocked from the start;
+  Longshore (**4,000 cr**) and Lantern (**15,000 cr**) show a 🔒 and their
+  unlock price until bought, greying out until you can afford them. Switching an
+  unlocked circuit re-simulates its bot field (cached per track, so flipping
+  back is instant), re-grids + counts you in, and shows that circuit's own
+  records, ghosts and per-track upgrades
 
 ## How it plays
 
-**A race is three laps.** Cross the start/finish line to begin lap 1 — the
-side panel's "Lap" row counts you through `1 / 3`, `2 / 3`, `3 / 3`. Each lap
-must hit every checkpoint gate in order (4 gates on Ember and Longshore, 7 on
-Lantern; skipping one invalidates that lap, which then doesn't count toward the
-race) — though the gates are generous about *how* you hit them, see
-*[Checkpoints](#checkpoints-bidirectional-wide-and-still-uncuttable)*. After three valid laps a race-complete message reports all three lap
-times and your best; **R** re-grids everyone and starts a fresh race.
+**Start menu, countdown, F1 grid.** On load (and after a full reset) a dark
+START overlay sits over the canvas: a title and a **GO** button. Pressing GO
+runs a **3‑2‑1‑GO countdown** on the canvas (~1 s each), and at GO the whole
+field launches **automatically, even with no player input** — everyone
+accelerates off the grid together. **R** re-grids and re-runs the countdown at
+any time.
 
-Lap 1 is run from the standing start on the grid, so it carries the
-accelerate-from-zero run-up; laps 2 and 3 cross the line already at speed and
-are **flying laps**, worth roughly 1.1–1.5 s each over the standing lap. That
-is why the panel compares you against the bots' best *flying* laps.
+The field lines up like an F1 grid, staggered back along the start straight:
+**player on POLE, then NOVICE 2nd, MID 3rd, PRO 4th, PRO+ 5th**, each a
+car-length-and-gap further back than the one ahead with a slight left/right
+zigzag. The slots are derived from the start-straight geometry (walked backward
+along the centerline, so they follow the track round a corner behind the line
+rather than running off into the grass) and each bot's simulated run *starts
+from its own slot* — so the further-back cars have a longer run to the line and
+the F1 spread falls out of the launch, not from an animation.
 
-### Getting paid
+**Then it is endless.** There is no fixed race length. After GO the player
+drives freely forever while the four bots loop their flying lap continuously as
+the pace reference. The side panel's *Laps* row is an endless tally. Each lap
+must still hit every checkpoint gate in order (4 gates on Ember and Longshore, 7
+on Lantern) to count — though the gates are generous about *how* you hit them,
+see *[Checkpoints](#checkpoints-bidirectional-wide-and-still-uncuttable)*. Your
+first lap from the grid carries the accelerate-from-zero run-up; every lap after
+crosses the line already at speed and is a **flying lap**, worth ~1.1–1.5 s.
+That is why the panel compares you against the bots' best *flying* laps.
 
-Two things pay credits:
+### Getting paid — your ranked best laps
+
+Each circuit keeps a **ranked list of your best distinct valid laps**
+(fastest-first, capped at 12), each a full per-tick recording. Two things pay
+credits:
 
 - **Driving a valid lap yourself.** Every clean lap pays immediately —
-  `round(720 / lapSeconds) x payoutMult x 2.5` credits, flashed in the panel
-  message (`Lap: 9.83s — +183 cr (best 9.51s)`). The `x2.5` is deliberate:
-  the ghost is idle income you set up once, so actually driving the lap should
-  beat watching a recording of yourself drive it.
-- **The earning ghosts**, which pay `round(720 / lapSeconds) x payoutMult`
-  per completed loop, forever.
+  `round(720 / lapSeconds) x payoutMult x 2.5` credits — and is inserted into
+  the ranked list.
+- **The earning ghosts.** Ghost #1 replays your **best** lap, #2 your **2nd
+  best**, #3 your 3rd best, and so on down the list. Each earns on **its own**
+  lap time — `round(720 / lapSeconds) x payoutMult` per loop — so a slower
+  ghost further down the list pays less per loop *and* loops less often. They
+  are staggered around the circuit (a golden-ratio offset of each ghost's own
+  length) so they spread out rather than stacking, and they are income and
+  scenery only — they never collide and never score a lap time.
 
-Whichever single lap is your fastest on a circuit — standing or flying —
-becomes **that circuit's** earning ghost if it beats the record there. The full
-per-tick recording of that one lap loops continuously; faster ghost laps pay
-more per lap *and* loop more often.
+**Fleet size** on a track is `min(1 + GhostFleetLevel, rankedLaps.length)` —
+your best lap is ghost #1 for free at Ghost Fleet Lv 0. **The Ghost Fleet buy is
+gated on having driven enough laps**: you can only buy the next level once you
+have another distinct recorded lap to fill the new ghost, so the button is
+disabled (with a *set another lap time* hint) whenever `rankedLaps.length` is
+not greater than the current fleet size — you may be able to *afford* it and
+still be blocked.
 
-**Every track's ghosts keep paying, all the time**, whichever circuit you are
-currently driving — only the active track's ghosts are drawn. Setting a first
-lap on a new circuit is therefore a permanent income increase, so exploring the
-tracks is worth credits rather than costing them. The panel's *Ghost payout*
-row is this track's per-loop figure; *Income* is every track's ghosts added up.
-
-**Ghost Fleet** buys more of those earning ghosts, **on every track at once**.
-Every extra ghost replays the same best lap and pays the same credits,
-staggered evenly around the circuit (ghost *k* starts `k / N` of a lap along),
-so income is exactly `N x` the single-ghost rate and arrives in evenly spaced
-instalments instead of one lump per lap. They are income and scenery — they
-never collide with anything and never earn you a lap time.
+**Every UNLOCKED track's fleet keeps paying, all the time**, whichever circuit
+you are currently driving — only the active track's ghosts are drawn. So
+unlocking a map and setting laps on it is a permanent income increase, and
+*Income* (the panel row) is every unlocked track's fleets summed, while *Ghost
+payout* is just this track's ghost #1.
 
 ### Three surfaces, none of them a trap
 
@@ -395,14 +421,16 @@ car spec, so a scratch script can print every corner's arc length against its
 tier-1 charge requirement across the whole upgrade range.
 
 
-## The bot ghosts (a 3-lap race, simulated live)
+## The bot ghosts (an endless pace field, simulated live)
 
-Four translucent **bot reference ghosts** race you over the same three laps,
-so you can calibrate "is it just me". They are **not** a baked recording:
-`bots.js` simulates each bot's entire 3-lap race headlessly in the browser at
-load, and again whenever your car changes, then plays the resulting samples
-back. That costs **60-140 ms for the whole four-bot field** (~8,500 pure
-physics ticks) and it buys two things a baked file cannot:
+Four translucent **bot reference ghosts** lap alongside you forever, so you can
+calibrate "is it just me". They are **not** a baked recording: `bots.js`
+simulates each bot's whole standing-start race *from its own grid slot*
+headlessly in the browser at load, and again whenever your car changes. The game
+then plays the **standing launch once** (spreading the F1 grid) and **loops the
+first flying lap forever** — both ends of that lap are on the start line, so the
+wrap is seamless. That costs **50-140 ms for the whole four-bot field** and it
+buys two things a baked file cannot:
 
 - **The bots drive YOUR car.** They use the same `carParams(state.levels)` you
   do, so buying an upgrade makes them quicker too and the race stays a test of
@@ -440,25 +468,18 @@ whole point of racing three of them. The side panel ("Bot best lap") shows
 each tier's best **flying** lap, since that is the like-for-like comparison
 against your own laps 2 and 3; hover a time to see its standing lap too.
 
-They earn nothing - they are pure pace references. All five cars share the
-same grid spot: the bots sit parked at your spawn, behind the line, until you
-first touch any drive control - then everyone launches together from a dead
-stop, a fair standing start that tests acceleration equally. Each bot drives
-its whole simulated 3-lap race once and then holds parked at the finish (no
-looping). Toggle them with **G**.
+They earn nothing - they are pure pace references. The whole field grids up F1
+style (player on pole, the four bots on slots 1..4 further back) and holds until
+GO: the countdown reaches zero and **everyone launches together with no player
+input required**, a fair standing start that tests acceleration equally. Each
+bot then loops its flying lap endlessly. Toggle them with **G**.
 
-### The race loop
+### The grid + countdown loop
 
-Crossing the line starts lap 1. When you complete the third valid lap the race
-**ends and re-grids you automatically**: the car is put back on the start grid
-at a dead stop, the three lap times and your best are shown, and the next race
-is armed. Nothing starts until you touch a control again - same standing-start
-rule as before, so the clock begins as you cross the line. **R** does the same
-thing at any time, abandoning a race in progress.
-
-None of this touches the economy: the earning ghost, your best lap and the
-credit loop are unchanged by a re-grid, and the best *single* lap of any race
-still becomes the ghost.
+The START menu's GO (or **R** at any time) re-grids the field and runs the
+3‑2‑1‑GO countdown; at GO everyone launches and laps forever. Nothing about the
+economy is touched by a re-grid: your ranked laps, the earning ghosts and the
+credit loop carry straight through, and the endless lap tally simply resets.
 
 ### Drift zones are derived, not hand-written
 
@@ -695,16 +716,18 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   from `track.js`'s derived polygons, drawn *under* the road edge line so the
   edge still reads as the boundary of the racing surface; the minimap
   deliberately shows the road only, since at ~0.05x scale a 30 px skirt is
-  noise), HUD (including the `Lap n / 3` race counter, the two-tier surface
-  warning and the race-complete summary), the **track selector** and
-  `switchTrack()` (swap the geometry, re-fit the minimap, re-simulate the
-  field, re-grid), the **per-track state** (`state.tracks[id] = { bestTicks,
-  ghostRec, ghostIndex }` — best lap, earning-ghost recording and playhead all
-  belong to the circuit they were set on) and the economy over it (your own lap
-  payout; every track's ghost fleet paying at once), localStorage save (v5,
-  currently behind `PERSISTENCE = false`), the automatic re-grid when a race
-  finishes, and bot reference ghost simulation (via `bots.js`), rendering +
-  G toggle.
+  noise), HUD (including the endless *Laps* tally, the two-tier surface warning
+  and the on-canvas 3‑2‑1‑GO countdown), the **start menu** overlay + countdown
+  state machine (`phase: menu | countdown | racing`), the **track selector /
+  unlock** and `switchTrack()` / `tryUnlock()` (swap the geometry, re-fit the
+  minimap, re-simulate the field, re-grid + count in), the **state split** —
+  global `{ credits, drivingLevels, currentTrack, unlocked }` and per-track
+  `state.tracks[id] = { rankedLaps: [{ticks,samples}], ghostHeads, lapPayoutLvl,
+  ghostFleetLvl }` — and the ranked-ghost economy over it (your own lap payout;
+  every unlocked track's fleet paying at once, each ghost on its own ranked
+  lap), localStorage save (v6, currently behind `PERSISTENCE = false`), and bot
+  reference ghost simulation + endless-loop playback (via `bots.js`), rendering
+  + G toggle.
 - `bots.js` — the bot drivers, imported by BOTH the game and the harness (so
   what the harness gates is exactly what you race). Skill presets (novice /
   average / expert / pro / proplus); `pursuitSteer()`, the physical
@@ -717,16 +740,17 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   plan against the clean line and keep the quicker *of those that stayed on
   the road*; the telemetry lap runner;
   and
-  `recordRace(skill, params, {laps})` — the 3-lap race recorder that drives
-  from rest at the grid through three consecutive laps, samples every tick,
-  returns per-lap times plus per-lap and whole-run telemetry (brake ticks,
-  the slowest point, handbrake/boost use, so the harness can prove the clean
-  line is not flat out), and returns `null` if any lap is invalid. On top of
-  that, `simulateBotField(params)` / `botField(params)` produce the whole
-  four-tier reference field for a given car, memoised on
-  (car spec + `TRACK_SIGNATURE`) in an 8-slot LRU so re-grids are free, only an
-  upgrade purchase re-runs the physics, and flipping back to a circuit you were
-  just on is instant.
+  `recordRace(skill, params, {laps, start})` — the standing-start recorder that
+  drives from rest at a grid slot (`start`, default the pole) through
+  consecutive laps, samples every tick, returns per-lap times plus per-lap and
+  whole-run telemetry (brake ticks, the slowest point, handbrake/boost use, so
+  the harness can prove the clean line is not flat out), and returns `null` if
+  any lap is invalid. On top of that, `simulateBotField(params)` /
+  `botField(params)` produce the whole four-tier reference field for a given car
+  — each bot started from *its own F1 grid slot* (`T.gridSlot(1..4)`) so the
+  launch spreads the field — memoised on (car spec + `TRACK_SIGNATURE`) in an
+  8-slot LRU so re-grids are free, only an upgrade purchase re-runs the physics,
+  and flipping back to a circuit you were just on is instant.
 - `test/drive_bot.mjs` — headless bot-driver test harness (acceptance).
 
 There is no `bot_ghosts.json` and no ghost exporter any more: the game
@@ -773,13 +797,20 @@ Beyond the bot laps, the suite runs six scripted feature tests:
   92%), grass must stay under 45% (it is at 30%), and running wide onto the
   concrete at speed must cost under 10% in the first second
 
-Design gates lock in the v5 balance and fail loudly if a future change undoes
+Design gates lock in the balance and fail loudly if a future change undoes
 it. **Everything below the scripted physics tests runs on all three tracks**
-(the physics scripts are track-independent, so they run once), against the
-*shipped* 3-lap race recordings. The suite is **120 checks in ~44 s** and
+(the physics scripts are track-independent, so they run once), against
+simulated standing-start recordings. The suite is **136 checks in ~32 s** and
 prints a per-track bot table, a per-track summary, the per-track runoff and
 cutting report, three sweep tables, the upgrade-sensitivity table and the
-value-per-credit table.
+value-per-credit table. It also carries light checks on the endless-model
+plumbing — the F1 grid slots are distinct, ordered pole→5th and on-road on
+every circuit, **and the four bots' actual simulated recordings begin at their
+assigned slots (1..4), mutually distinct** (so a "computed but unused" grid
+regression can't recur); ranked-lap insertion stays sorted and capped; and the
+Ghost Fleet buy-gate math never lets the fleet exceed the recorded-lap count —
+all kept *out* of the driving sweep because none of it affects how the car
+drives.
 
 - **casual-friendly everywhere** — on every circuit the timid keyboard NOVICE
   must complete ≥ 8/10 valid laps with < 6% of its ticks off-road and a wobble
@@ -819,14 +850,15 @@ value-per-credit table.
 - **the concrete makes it gentler, never harsher** — the NOVICE bot must never
   reach the grass at all on any circuit (it does not: 0.00% off-road
   everywhere, which the concrete can only improve on)
-- **a race is three laps** — every reference bot must string three *valid*
-  laps together (all checkpoints, in order, every lap) on every track
-- **flying laps are real** — every bot's best flying lap must beat its own
-  standing-start lap 1, and the tier ladder must hold on best flying lap as
-  well as on total race time
-- **on-road margin** — the whole 3-lap race must stay ≥ 8 px (PRO) / ≥ 3 px
-  (PRO+) inside the road edge, so no re-tune can buy time by scraping grass
-  or by holding together for only one lap
+- **the endless field loops valid laps** — every reference bot must string
+  consecutive *valid* laps together (all checkpoints, in order, every lap) on
+  every track, which is what the game loops forever
+- **flying laps are real** — every bot's flying lap must be faster than its
+  gridded standing launch, and the tier ladder must hold on best flying lap as
+  well as on total time
+- **on-road margin** — the whole standing-start race must stay ≥ 8 px (PRO) /
+  ≥ 3 px (PRO+) inside the road edge, so no re-tune can buy time by scraping
+  grass or by holding together for only one lap
 - **the upgrade-space sweep, on every track** — because the bots race your
   upgraded car, the field is re-simulated across a sample of the whole
   **driving**-upgrade space (`speed, accel, grip, boostPwr, boostDur`; Lap
@@ -854,7 +886,7 @@ value-per-credit table.
   *every* tier faster than stock, so "monotone" cannot be satisfied by a
   controller that ignores the car
 
-## Current features (v5)
+## Current features (v6)
 
 - **Three hand-authored circuits**, each defined as a path of straights and
   arcs and built into a Catmull-Rom centerline + gates + sectors + collision
@@ -864,8 +896,10 @@ value-per-credit table.
   — the boost track), **LONGSHORE SPEEDWAY** (3 473 px, long straights and four
   flat-out double-apex corners — the top-speed track), **LANTERN COIL**
   (2 222 px, seven linked medium-speed corners with no straights — the grip
-  track). A compact selector in the side panel switches between them; the bot
-  field, the best lap, the earning ghosts and the records are all per track
+  track). **Ember is unlocked from the start; Longshore (4,000 cr) and Lantern
+  (15,000 cr) are one-off credit unlocks** shown with a 🔒 and their price in
+  the selector. The bot field, the ranked best laps, the earning ghosts and the
+  per-track economy are all per track
 - Arcade car physics at a fixed 60 Hz timestep: smoothed speed-sensitive
   steering, damped lateral slip, unhurried acceleration (~2.7 s to 90% of
   top speed), handbrake drift with fading tire marks and a slip-angle
@@ -880,27 +914,27 @@ value-per-credit table.
   nothing — so straight-line slides, steering wiggles and handbrake stops
   can't farm boosts. Boost is deterministic, inside `stepCar`, so ghosts
   replay it
-- **Three-lap races**: lap 1 from the standing start, laps 2–3 flying
-  (~1.1–1.5 s quicker). A `Lap n / 3` counter runs in the side panel and a
-  race-complete message reports all three lap times plus your best; R
-  re-grids and restarts. The economy is untouched — your best *single* lap
-  is still the earning ghost
-- Bot reference ghosts: a four-tier skill ladder racing the same three laps,
-  **re-simulated per circuit** — on Ember, NOVICE (green, timid, 12.03 s flying
-  on the stock car), MID (purple, clean line, no drift, 10.23 s), PRO (cyan,
-  the optimal clean lap, never drifts, 9.78 s) and PRO+ (gold, slides both
-  loops and fires the banked boost onto the straights, 8.45 s, i.e. 1.3 s up on
-  PRO); 15.67 / 13.12 / 12.75 / 12.43 s on Longshore and 13.90 / 11.17 /
-  10.83 / 10.10 s on Lantern — from a shared-grid
-  standing start: parked at your spawn until your first input, then the full
-  3-lap race once before they hold at the finish (R re-grids) — as
-  translucent labeled ghosts with minimap dots and side-panel
-  best-flying-lap times; toggle with G (saved). **Simulated live in the
-  browser** on your current upgraded car (60–140 ms for the field), so their
-  times move when you buy an upgrade; PRO+'s drift zones are derived from
-  track curvature rather than hand-placed
-- Automatic race restart: finishing the third lap puts you back on the grid,
-  stopped and re-armed, with the three lap times and your best on screen
+- **Start menu + countdown + endless racing**: a dark START overlay (title +
+  GO) over the canvas; GO runs a 3‑2‑1‑GO countdown and the whole field launches
+  from the F1 grid automatically at GO, **with no player input required**. After
+  that the player laps freely forever while the bots loop, and the side panel's
+  *Laps* row is an endless tally. R re-grids and re-runs the countdown
+- **F1 grid start**: player on POLE, then NOVICE/MID/PRO/PRO+ on slots 1..4,
+  each further back along the start straight (slots derived from track geometry,
+  walked backward along the centerline so they stay on-road on every circuit).
+  Each bot's run starts from *its own slot*, so the standing launch spreads the
+  field into an F1 stagger naturally
+- Bot reference ghosts: a four-tier skill ladder, **re-simulated per circuit**
+  — on Ember, NOVICE (green, timid, 12.03 s flying on the stock car), MID
+  (purple, clean line, no drift, 10.23 s), PRO (cyan, the optimal clean lap,
+  never drifts, 9.78 s) and PRO+ (gold, slides both loops and fires the banked
+  boost onto the straights, ~8.4 s); comparable ladders on Longshore and
+  Lantern. Each plays its standing launch from the grid once, then **loops its
+  flying lap forever** as the pace reference — translucent labeled ghosts with
+  minimap dots and side-panel best-flying-lap times; toggle with G. **Simulated
+  live in the browser** on your current upgraded car (50–140 ms for the field),
+  so their times move when you buy an upgrade; PRO+'s drift zones are derived
+  from track curvature rather than hand-placed
 - Brake gate: holding brake stops and holds the car; reverse needs a
   deliberate re-press or a 0.35 s hold at standstill
 - Rotating follow camera: forward is up, car sits below screen center,
@@ -920,34 +954,39 @@ value-per-credit table.
   all on the inside, plus a **directional** start/finish line so a lap can
   never be completed by reversing over it
 - Ghost recording/playback (per-tick position + angle samples), per track
-- Economy: **your own valid lap pays too** (2.5x what one ghost loop of the
-  same lap length pays, flashed in the panel the moment you cross the line),
-  plus credits per ghost loop; income scales with lap speed, and **every
-  track's ghosts pay at once**, so a first lap on a new circuit is a permanent
-  income increase
-- **7 upgrades** with geometric cost growth, applied to the player car (and
-  therefore to the bots) instantly; the ghost keeps replaying the old
-  recording until you beat it:
-  - *driving* — **Top Speed** (90 cr, **x1.95/lvl**: a soft-capped top-speed
-    bonus, +10% at Lv 1 rising to +48% at Lv 8 and +67% at Lv 20, plus 26% of
-    that again in brakes — deliberately the priciest and the only one with
-    diminishing returns, because it is the only one that helps everywhere),
-    **Acceleration** (40 cr, x1.6: +12% accel, +8% brakes), **Grip** (45 cr,
-    x1.5: +1 handling), **Boost Power** (25 cr, **x1.3**: soft-capped +14%/lvl
-    to both drift-boost tiers, so tier 1 goes +28% -> +55% at Lv 8), **Boost
-    Duration** (20 cr, **x1.3**: soft-capped +14%/lvl of boost time)
-  - *economy* — **Lap Payout** (60 cr, x1.7: x1.3 credits/level) and **Ghost
-    Fleet** (400 cr, **x7/lvl**: +1 earning ghost, i.e. a straight income
-    multiplier; the extra ghosts are staggered evenly around the lap)
-- localStorage save/load (credits, upgrade levels, selected track, **per-track
-  best times and ghost recordings**, bot-ghost visibility) — save key v5,
-  **currently DISABLED behind `const PERSISTENCE = false` for prototyping**: a
-  refresh resets everything and any `trackcrimental_*` key is cleared at boot
-- Headless bot-driver harness with F1-style telemetry, **120 acceptance gates
-  (~44 s)** covering all three circuits: scripted drift-boost / drift-control /
+- **Ranked-ghost economy**, per track: each circuit keeps your best distinct
+  valid laps fastest-first (capped at 12). Ghost #1 replays your best, #2 your
+  2nd best, ..., each looping its own recording and earning on its own lap time
+  (`round(720 / lapSeconds) x payoutMult`), staggered around the lap. Driving a
+  valid lap also pays you `x2.5` directly. **Every unlocked track's fleet earns
+  at once**, so unlocking maps grows total income; *Ghost payout* is this
+  track's ghost #1, *Income* is all unlocked tracks summed
+- **Upgrades — global car vs per-track economy**, with geometric cost growth:
+  - *driving (GLOBAL — the car; the bots inherit it)* — **Top Speed** (90 cr,
+    **x1.95/lvl**: a soft-capped top-speed bonus, +10% at Lv 1 rising to +48% at
+    Lv 8, plus 26% of that in brakes), **Acceleration** (40 cr, x1.6: +12%
+    accel, +8% brakes), **Grip** (45 cr, x1.5: +1 handling), **Boost Power**
+    (25 cr, **x1.3**: +14%/lvl to both drift-boost tiers), **Boost Duration**
+    (20 cr, **x1.3**: +14%/lvl of boost time)
+  - *economy (PER TRACK)* — **Lap Payout** (60 cr, x1.7: x1.3 credits/level on
+    this track) and **Ghost Fleet** (400 cr, **x7/lvl**: +1 earning ghost on
+    this track). **Ghost Fleet is buy-gated**: you can only buy the next level
+    once you have another distinct recorded lap here to fill the new ghost, even
+    if you can afford it (the button greys with a *set another lap time* hint).
+    The panel labels the two groups *Car — global* and *This track*
+- localStorage save/load, **schema v6** (credits, global driving levels,
+  unlocked set, current track, and per-track `{ lapPayoutLvl, ghostFleetLvl,
+  rankedLaps: [{ticks,samples}] }`) — **currently DISABLED behind `const
+  PERSISTENCE = false` for prototyping**: a refresh resets everything and any
+  `trackcrimental_*` key is cleared at boot
+- Headless bot-driver harness with F1-style telemetry, **136 acceptance gates
+  (~32 s)** covering all three circuits: scripted drift-boost / drift-control /
   exploit-regression / brake-gate / three-surface feature tests, per-circuit
   gate-rule and cut-the-corner regressions, runoff placement checked from the
   derived width arrays, per-track upgrade-space sweeps asserting bot ordering
-  and per-upgrade monotonicity over ~370 simulated car specs, and a
-  **value-per-credit** table that *measures* each circuit rewarding a different
-  upgrade for the same money
+  and per-upgrade monotonicity over ~370 simulated car specs, a
+  **value-per-credit** table, and light checks on the endless-model plumbing
+  (F1 grid slots distinct/ordered/on-road *and the actual bot recordings
+  starting at their slots*; ranked-lap insertion sorted+capped; the fleet-buy
+  gate math) — the economy is kept *out* of the driving sweep because it does
+  not affect how the car drives

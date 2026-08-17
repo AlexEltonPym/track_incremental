@@ -259,6 +259,11 @@ export function buildCenterline(pts, samplesPerSeg) {
 const GRID_CELL = 32;
 const GRID_REACH = 80;     // px of segments kept per cell; beyond this, rescan
 
+// F1 STARTING-GRID spacing (see gridSlot). Single-file staggered: each car a
+// car-length-plus-gap further back than the one ahead, with a lateral zigzag.
+const GRID_STEP = 40;      // px between consecutive grid positions along the straight
+const GRID_LAT = 11;       // px lateral left/right stagger
+
 // ------------------------------------------------------- the concrete runoff
 //
 // A THIRD SURFACE, placed the way a real circuit places it: a concrete skirt on
@@ -470,6 +475,27 @@ export function buildTrack(def) {
     y: START_GATE.y - START_GATE.fy * 40,
   };
   const START_ANGLE = Math.atan2(START_GATE.fy, START_GATE.fx);
+
+  // F1 GRID SLOTS, derived from the track geometry so the field lines up on
+  // every circuit. Slot 0 is POLE (40 px behind the line, ~= START_POS); each
+  // further slot steps GRID_STEP px further back ALONG THE CENTERLINE (so the
+  // grid follows the track round a corner behind the line rather than running
+  // straight off into the grass), with a small left/right zigzag the way a real
+  // grid staggers. The game grids the player on pole and the four bots on slots
+  // 1..4 (NOVICE, MID, PRO, PRO+); each bot's simulated run STARTS from its
+  // slot, so the further-back cars have a longer run to the line and the F1
+  // spread falls out of the launch rather than being animated.
+  const gridSlot = k => {
+    const back = 40 + k * GRID_STEP;
+    const lat = k === 0 ? 0 : (k % 2 === 1 ? GRID_LAT : -GRID_LAT);
+    const arc = ((-back) % TRACK_LEN + TRACK_LEN) % TRACK_LEN;   // startArc(0) - back
+    const i = indexAtArc(arc);
+    const p = CENTER[i], q = CENTER[(i + 1) % N];
+    const dx = q[0] - p[0], dy = q[1] - p[1];
+    const L = Math.hypot(dx, dy) || 1;
+    const fx = dx / L, fy = dy / L;           // forward tangent; normal (-fy, fx)
+    return { x: p[0] - fy * lat, y: p[1] + fx * lat, angle: Math.atan2(fy, fx) };
+  };
 
   // Squared distance from a point to centerline segment i. `HIT` carries the
   // parameter along the segment and the SIDE the point is on out of the hot
@@ -827,7 +853,7 @@ export function buildTrack(def) {
     def, id: def.id, name: def.name, short: def.short,
     skill: def.skill, skillLabel: def.skillLabel,
     ROAD_HALF, CONTROL, CENTER, N, CUMLEN, TRACK_LEN,
-    START_GATE, START_POS, START_ANGLE, CHECKPOINTS, SECTORS, TRACK_SIGNATURE,
+    START_GATE, START_POS, START_ANGLE, gridSlot, CHECKPOINTS, SECTORS, TRACK_SIGNATURE,
     bounds: GRID.bounds,
     RUNOFF_POS, RUNOFF_NEG, RUNOFF_BANDS, RUNOFF_CORNERS, RUNOFF_COVERAGE,
     indexAtFraction, indexAtArc, makeGate, segSpan, sectorAt,
@@ -887,6 +913,9 @@ export function setTrack(id) {
 setTrack(DEFAULT_TRACK);
 
 // ---- geometry queries, delegated to the active track ----
+// Grid slot k (0 = pole == START_POS): { x, y, angle }. Derived from the active
+// track's start-straight geometry, so the field lines up on every circuit.
+export const gridSlot = k => TRACK.gridSlot(k);
 export const indexAtFraction = f => TRACK.indexAtFraction(f);
 export const indexAtArc = a => TRACK.indexAtArc(a);
 export const makeGate = i => TRACK.makeGate(i);

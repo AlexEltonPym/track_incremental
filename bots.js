@@ -12,8 +12,11 @@
 // There is no baked bot_ghosts.json any more: positions are simulated, never
 // shipped, which is what lets the bots respond to upgrades and to new maps.
 
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js";
-import * as T from "./track.js";
+// ?v= cache-busting: keep in lockstep with main.js's imports (see the note
+// there) so a caching server can't serve a stale bots.js against a fresh
+// track.js — the split that left the F1 grid computed but unused.
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=6";
+import * as T from "./track.js?v=6";
 
 // ---------------------------------------------------------------- PRNG
 
@@ -870,7 +873,12 @@ export function makeBot(skill, params) {
 export function recordRace(skill, params, opts = {}) {
   const laps = opts.laps ?? 3;
   const maxTicks = opts.maxTicks ?? 60 * 120 * laps;   // 2 min budget per lap
-  const car = createCarState(T.START_POS.x, T.START_POS.y, T.START_ANGLE);
+  // Start from `opts.start` (an F1 grid slot) if given, else the pole/spawn.
+  // A further-back slot just means a longer standing-start run-up to the line;
+  // the flying laps that follow are line-to-line and unaffected, so the bot
+  // ladder and every invariant that reads bestFlyingTicks are untouched.
+  const start = opts.start || T.START_POS;
+  const car = createCarState(start.x, start.y, start.angle ?? T.START_ANGLE);
   const lap = T.createLap();
   const bot = makeBot(skill, params);
   const samples = [[car.x, car.y, car.angle]];     // t=0: parked on the grid
@@ -1183,14 +1191,19 @@ export function simulateBotField(params, opts = {}) {
   const laps = opts.laps ?? 3;
   const t0 = (typeof performance !== "undefined" ? performance : Date).now();
   const field = [];
-  for (const tier of BOT_TIERS) {
+  // The four bots grid up behind the player: NOVICE on slot 1, MID 2, PRO 3,
+  // PRO+ 4 (pole/slot 0 is the player). Each bot's whole race is simulated FROM
+  // its slot, so the standing launch spreads the field into an F1 grid stagger
+  // naturally, and the flying laps that follow are the endless pace reference.
+  BOT_TIERS.forEach((tier, ti) => {
     const base = SKILLS[tier.skill];
+    const start = T.gridSlot(ti + 1);
     for (const off of SEED_FALLBACKS) {
       const rec = raceBest(off ? { ...base, seed: base.seed + off } : base,
-        params, { laps });
+        params, { laps, start });
       if (rec) { field.push({ ...tier, ...rec }); break; }
     }
-  }
+  });
   field.simMs = (typeof performance !== "undefined" ? performance : Date).now() - t0;
   return field;
 }
