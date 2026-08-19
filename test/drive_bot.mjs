@@ -24,12 +24,12 @@ import {
   TICK, G_PX, SURFACE, carParams, legacyParams, createCarState, stepCar, slipAngle,
   ZERO_LEVELS, DRIVING_UPGRADES, UPGRADE_BY_ID, levelsForBudget,
   insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "../physics.js?v=7";
+} from "../physics.js?v=8";
 import {
   SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
   simulateBotField, BOT_TIERS,
-} from "../bots.js?v=7";
-import * as T from "../track.js?v=7";
+} from "../bots.js?v=8";
+import * as T from "../track.js?v=8";
 
 // ---------------------------------------------------------------- scripted feature tests
 

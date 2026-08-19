@@ -73,32 +73,36 @@ const DEG = Math.PI / 180;
 // identity), for ANY such half. That lets the corners be placed freely — the
 // only rule the half must obey is "arc degrees sum to -180".
 const CRUISE = (() => {
-  // The windy first half. Arc degrees: -45+20-50+25-48+42-60-64 = -180
-  // (the half MUST net exactly -180 for the duplicated loop to close).
-  // A mix of "working" sweepers (radius 260-300, a mild lift below top speed so
-  // the bot tiers separate and the runoff has somewhere to sit) and grand
-  // flowing bends (radius 420-600, flat out — pure scenery). Every radius is
-  // large and every corner short enough that no slide can ever bank a charge
-  // here (verified across the whole upgrade range), so PRO+ plans no drift and
-  // there is no dominant upgrade — exactly the point of a chill cruise. Long
-  // straights carry the length; nothing is tight or technical.
+  // The windy first half — now almost ALL sweeping arc (~91%), no long
+  // straights to just hold W down: one gentle bend hands off to the next,
+  // alternating direction, so you are always turning. Arc degrees:
+  // -88+84-90+82-86+80-92+78-88+82-84+76-70-64 = -180 (the half MUST net
+  // exactly -180 for the point-symmetric duplication to close the loop).
+  // Every radius is large (560-740 px — grander and gentler than before, so
+  // nothing needs braking) and every corner far too long-radiused to ever bank
+  // a drift charge at any spec, so PRO+ plans no drift and there is no dominant
+  // upgrade — the point of a chill cruise. The alternating sweepers carry the
+  // length (~2 min lap) instead of straights. Four 300 px links are the only
+  // breathers.
   const half = [
-    ["s", 3600, "the coast straight"],
-    ["a", 280, -45, "Sea Point sweeper"],
-    ["s", 2800, "the long reach"],
-    ["a", 560, 20, "the inlet bend"],
-    ["s", 1800],
-    ["a", 300, -50, "Gull Point"],
-    ["s", 3200, "the bay straight"],
-    ["a", 600, 25, "the dune kink"],
-    ["s", 2100],
-    ["a", 260, -48, "Smugglers Cove"],
-    ["s", 2900, "the headland straight"],
-    ["a", 300, 42, "the marsh bend"],
-    ["s", 2000],
-    ["a", 580, -60, "the cliffs"],
-    ["a", 420, -64, "the point"],
-    ["s", 2400, "the marina straight"],
+    ["a", 620, -88, "Sea Point sweep"],
+    ["a", 660, 84, "the inlet"],
+    ["a", 580, -90, "Gull curve"],
+    ["s", 300],
+    ["a", 700, 82, "the dune bend"],
+    ["a", 600, -86, "Smugglers sweep"],
+    ["a", 720, 80, "the marsh arc"],
+    ["a", 560, -92, "the cove"],
+    ["s", 300],
+    ["a", 740, 78, "the lagoon bend"],
+    ["a", 600, -88, "the bluffs"],
+    ["a", 680, 82, "the reach"],
+    ["s", 300],
+    ["a", 620, -84, "the cliffs"],
+    ["a", 700, 76, "the headland"],
+    ["a", 650, -70, "the outer point"],
+    ["s", 300],
+    ["a", 600, -64, "the marina curve"],
   ];
   // Point-symmetric return half: the same shape, names suffixed so each sector
   // stays distinct in the telemetry.
@@ -114,13 +118,14 @@ const CRUISE = (() => {
     // Wide and forgiving — the widest road on any circuit.
     roadHalf: 52,
     start: [1200, 4200], heading: 0,
-    // Coarser sampling than the others (large radii and long straights need no
-    // dense control points), which keeps the centerline point count — and with
-    // it the broad-phase grid build and the per-tick nearest-point search — in
-    // the same ballpark as the short circuits despite the much greater length.
+    // Coarser sampling than the others (the large radii need no dense control
+    // points), which keeps the centerline point count — and with it the
+    // broad-phase grid build and the per-tick nearest-point search — modest
+    // despite the length.
     spacing: 60, samples: 4,
-    // Six gates spread around the big loop, on corner apexes.
-    checkpoints: [[1, 0.5], [7, 0.5], [13, 0.5], [17, 0.5], [23, 0.5], [29, 0.5]],
+    // Six gates spread around the loop, each on a sweeper apex (half segs 0-17,
+    // return 18-35; these indices are all arcs).
+    checkpoints: [[1, 0.5], [6, 0.5], [11, 0.5], [19, 0.5], [24, 0.5], [29, 0.5]],
     segs: [...half, ...back],
   };
 })();

@@ -15,8 +15,8 @@
 // ?v= cache-busting: keep in lockstep with main.js's imports (see the note
 // there) so a caching server can't serve a stale bots.js against a fresh
 // track.js — the split that left the F1 grid computed but unused.
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=7";
-import * as T from "./track.js?v=7";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=8";
+import * as T from "./track.js?v=8";
 
 // ---------------------------------------------------------------- PRNG
 
