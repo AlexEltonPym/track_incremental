@@ -1,13 +1,22 @@
-// decor.js — PURELY COSMETIC world scenery: lakes, forests, rocks, bushes and
-// flowers scattered in the grass AROUND the track. No physics, no collision,
-// no effect on the car or the bots — it just makes the off-track world look
-// alive instead of flat green.
+// decor.js — PURELY COSMETIC world scenery: a DENSE FOREST band that hugs the
+// track corridor, with lakes, clearings, rocks, bushes and flowers. No physics,
+// no collision, no effect on the car or the bots — it just makes the off-track
+// world look alive instead of flat green.
 //
-// Everything here is DERIVED FROM GEOMETRY (the track's bounding box +
-// distToTrack) and a SEEDED PRNG keyed on the track signature, so a track's
-// scenery is deterministic: identical across frames and across reloads, and
-// regenerated only when the track (its signature) actually changes. Results are
-// CACHED per signature, so flipping back to a track you were just on is instant.
+// THE SHAPE OF IT (all derived from geometry, never hand-placed):
+//   * a GRASS CORRIDOR — a clear ring of grass of width GAP px around the road
+//     edge, with NO trees, so the track visibly sits in a grassy corridor;
+//   * a DENSE FOREST BAND beyond it — trees packed on a jittered grid that
+//     FOLLOWS the track on both sides (the outside AND the loop interior),
+//     bounded to a finite width so it hugs the corridor rather than paving the
+//     whole world (which also caps the tree count);
+//   * occasional grass CLEARINGS punched into the forest (blob-shaped holes);
+//   * the occasional LAKE, sited inside the forest as a natural watery clearing.
+//
+// Everything is placed from the track's bounding box + distToTrack + indexAtArc
+// using a SEEDED PRNG keyed on TRACK_SIGNATURE, so a track's scenery is
+// deterministic (identical across frames and reloads), regenerated only when the
+// track changes and CACHED per signature (flipping back is instant).
 //
 // It imports track.js at the SAME ?v=9 token every other module uses — a
 // different token would split track.js into a second instance and break the
@@ -17,26 +26,29 @@ import * as T from "./track.js?v=9";
 // ---------------------------------------------------------------- palette
 //
 // A calm, muted natural palette. This is BACKGROUND: the road and cars must stay
-// the clear focus, so nothing here is saturated or bright. Exported so main.js's
-// draw loop and this generator agree on which colour index means what.
+// the clear focus. Exported so main.js's draw loop and this generator agree on
+// which colour index means what.
 export const PALETTE = {
-  // Canopy greens, all darker/greyer than the pure road-side greens so a forest
-  // reads as depth rather than noise.
   trees: ["#2f4a2b", "#35512f", "#294324", "#3c5836", "#2b4b30"],
   treeShadow: "rgba(0,0,0,0.16)",
   rocks: ["#585d58", "#4c514c", "#646a63"],
   bushes: ["#3a5233", "#46603c", "#324a2e"],
   flowers: ["#c9b24a", "#c88a5e", "#b0698a", "#c7c2a0"],
-  water: "#4b86ad",
-  waterEdge: "rgba(38,64,86,0.45)",
+  water: "#4b86ad",       // the lighter water the user set — do not revert
+  waterEdge: "rgba(40,92,120,0.55)",
   shore: "#7d7856",       // muted sand ring around a lake
   island: "#33502c",
   reed: "rgba(60,86,52,0.7)",
 };
 
+// ---------------------------------------------------------------- tuning
+const GAP = 175;             // grass corridor width beyond the road edge (px)
+const FOREST_W = 600;        // forest band width beyond the corridor (px)
+const TARGET_CAND = 14000;   // candidate trees on the biggest track -> spacing
+const MIN_SP = 27;           // densest tree spacing (small tracks)
+const TREE_CAP = 14000;      // hard ceiling on trees per track
+
 // ---------------------------------------------------------------- PRNG
-// mulberry32 — tiny, fast, deterministic. Seeded from a string hash of the
-// track signature so each track gets its own stable layout.
 function hashStr(s) {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -55,36 +67,22 @@ function mulberry32(seed) {
 const TAU = Math.PI * 2;
 
 // Light per-track flavour — automatic from the track id, with a neutral default
-// so any FUTURE track still gets sensible scenery. These are only gentle
-// multipliers on top of the geometry-driven counts; no coordinates here.
+// so any FUTURE track still gets sensible scenery. Only gentle multipliers on
+// the geometry-driven counts; no coordinates here. `forest` also modulates the
+// tree spacing floor (a bigger number = denser).
 const FLAVOUR = {
-  ember:     { forest: 0.9, lake: 0.15, rock: 1.2, bush: 1.0, flower: 1.0 },
-  longshore: { forest: 0.8, lake: 1.25, rock: 0.8, bush: 0.9, flower: 1.1 },
-  lantern:   { forest: 0.7, lake: 0.4,  rock: 1.7, bush: 0.8, flower: 0.8 },
-  cruise:    { forest: 1.2, lake: 1.7,  rock: 0.9, bush: 1.15, flower: 1.25 },
-  _default:  { forest: 1.0, lake: 1.0,  rock: 1.0, bush: 1.0, flower: 1.0 },
+  ember:     { forest: 0.9, lake: 0.6, rock: 1.2, bush: 1.0, flower: 1.0, clearing: 1.0 },
+  longshore: { forest: 0.85, lake: 1.3, rock: 0.8, bush: 0.9, flower: 1.1, clearing: 1.1 },
+  lantern:   { forest: 0.75, lake: 0.7, rock: 1.7, bush: 0.8, flower: 0.8, clearing: 0.9 },
+  cruise:    { forest: 1.15, lake: 1.7, rock: 0.9, bush: 1.15, flower: 1.25, clearing: 1.3 },
+  _default:  { forest: 1.0, lake: 1.0, rock: 1.0, bush: 1.0, flower: 1.0, clearing: 1.0 },
 };
 
-// ---------------------------------------------------------------- generation
+// ---------------------------------------------------------------- lakes
 
-// Rejection-sample a point in the padded bbox that clears the road by `roadClear`.
-// Density RAMPS UP with distance from the road (clear margin near the tarmac,
-// denser out in the grass), so decoration never crowds the racing surface.
-function samplePoint(rng, bb, distFn, roadClear, ramp, minP, tries) {
-  for (let t = 0; t < tries; t++) {
-    const x = bb.x0 + rng() * bb.w;
-    const y = bb.y0 + rng() * bb.h;
-    const d = distFn(x, y);
-    if (d <= roadClear) continue;
-    const p = Math.min(1, Math.max(minP, (d - roadClear) / ramp));
-    if (rng() < p) return [x, y, d];
-  }
-  return null;
-}
-
-// An irregular organic lake: a jittered loop (two low harmonics + a little
-// noise), NOT a circle. Returns the polygon, a bounding radius, an outer shore
-// ring, an optional island and a few reed tufts.
+// An irregular organic lake: a jittered loop (two low harmonics + noise), NOT a
+// circle. Returns the polygon, a bounding radius, an outer shore ring, an
+// optional island and a few reed tufts.
 function makeLake(cx, cy, baseR, rng) {
   const nv = 9 + Math.floor(rng() * 6);
   const ph1 = rng() * TAU, ph2 = rng() * TAU;
@@ -101,7 +99,6 @@ function makeLake(cx, cy, baseR, rng) {
     shore.push([cx + c * (rr + shoreW), cy + s * (rr + shoreW)]);
     if (rr > maxR) maxR = rr;
   }
-  // A tiny island in bigger lakes.
   let island = null;
   if (baseR > 78 && rng() < 0.45) {
     const io = baseR * 0.35 * rng(), ia = rng() * TAU;
@@ -115,7 +112,6 @@ function makeLake(cx, cy, baseR, rng) {
     }
     island = iv;
   }
-  // A few reed tufts poking up from the shore of some lakes.
   const reeds = [];
   const nr = rng() < 0.6 ? 2 + Math.floor(rng() * 4) : 0;
   for (let i = 0; i < nr; i++) {
@@ -125,114 +121,185 @@ function makeLake(cx, cy, baseR, rng) {
   return { cx, cy, r: maxR + shoreW, poly, shore, island, reeds };
 }
 
+// ---------------------------------------------------------------- generation
+
 function build(track) {
-  const { ROAD_HALF, bounds, TRACK_SIGNATURE } = track;
-  const distFn = (x, y) => track.distToTrack(x, y);
+  const { ROAD_HALF, CENTER, N, TRACK_LEN, TRACK_SIGNATURE } = track;
+  const dist = (x, y) => track.distToTrack(x, y);
   const rng = mulberry32(hashStr(TRACK_SIGNATURE));
   const fl = FLAVOUR[track.id] || FLAVOUR._default;
 
-  const bw = bounds.maxX - bounds.minX, bh = bounds.maxY - bounds.minY;
-  const pad = Math.max(300, Math.min(bw, bh) * 0.18);
-  const bb = { x0: bounds.minX - pad, y0: bounds.minY - pad, w: bw + 2 * pad, h: bh + 2 * pad };
-  const area = bb.w * bb.h;
+  const inner = ROAD_HALF + GAP;              // forest starts here
+  const outer = inner + FOREST_W;             // ...and ends here
+  const roadClear = ROAD_HALF + 40;           // detail may sit this far off road
 
-  const roadClear = ROAD_HALF + 46;   // comfortable clear margin around the road
-  const ramp = 260;                    // px over which density climbs to full
-  const minP = 0.22;                   // floor acceptance just past the margin
+  // A point somewhere in the forest band: walk to a random arc, step out along
+  // the normal by an offset within the band, return it validated (distToTrack in
+  // band) or null. Used to seed clearings and lakes into the forest.
+  const bandPoint = (loR, hiR, tries) => {
+    for (let t = 0; t < tries; t++) {
+      const i = track.indexAtArc(rng() * TRACK_LEN);
+      const p = CENTER[i], q = CENTER[(i + 1) % N];
+      let tx = q[0] - p[0], ty = q[1] - p[1];
+      const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
+      const side = rng() < 0.5 ? 1 : -1;
+      const o = loR + rng() * (hiR - loR);
+      const x = p[0] - ty * side * o, y = p[1] + tx * side * o;
+      const d = dist(x, y);
+      if (d >= inner && d <= outer) return [x, y, d];
+    }
+    return null;
+  };
 
+  // ---- clearings: blob-shaped grass holes punched into the forest.
+  const clearings = [];
+  const nClear = Math.max(3, Math.round(TRACK_LEN / 2500 * fl.clearing));
+  for (let i = 0; i < nClear; i++) {
+    const c = bandPoint(inner + 30, outer - 30, 24);
+    if (!c) continue;
+    clearings.push({
+      cx: c[0], cy: c[1], r: 80 + rng() * 150,
+      a1: 0.18 + rng() * 0.2, a2: 0.08 + rng() * 0.12,
+      ph1: rng() * TAU, ph2: rng() * TAU,
+    });
+  }
+  const inClearing = (x, y) => {
+    for (const c of clearings) {
+      const dx = x - c.cx, dy = y - c.cy;
+      const dd = dx * dx + dy * dy;
+      if (dd > c.r * c.r * 2) continue;
+      const ang = Math.atan2(dy, dx);
+      const rr = c.r * (1 + c.a1 * Math.sin(ang + c.ph1) + c.a2 * Math.sin(2 * ang + c.ph2));
+      if (dd < rr * rr) return true;
+    }
+    return false;
+  };
+
+  // ---- lakes: sited inside the forest band, well clear of the road and apart.
   const lakes = [];
-  const trees = [];
-  const rocks = [];
-  const bushes = [];
-  const flowers = [];
-
-  // ---- lakes: a few, in the deep grass, well clear of the road and each other.
-  const maxLakeR = Math.max(60, Math.min(240, Math.min(bw, bh) * 0.06));
-  const nLakes = Math.min(16, Math.round(area / 5.2e6 * fl.lake));
+  const maxLakeR = Math.max(55, Math.min(150, FOREST_W * 0.32));
+  const nLakes = Math.max(1, Math.min(10, Math.round(TRACK_LEN / 5000 * fl.lake)));
   for (let i = 0; i < nLakes; i++) {
-    const baseR = 42 + rng() * (maxLakeR - 42);
+    const baseR = 40 + rng() * (maxLakeR - 40);
     let placed = null;
     for (let t = 0; t < 40; t++) {
-      const x = bb.x0 + rng() * bb.w, y = bb.y0 + rng() * bb.h;
-      const need = roadClear + baseR * 1.25 + 24;
-      if (distFn(x, y) < need) continue;
-      // keep lakes apart
+      // centre far enough out that the whole lake clears the corridor
+      const c = bandPoint(inner + baseR + 10, outer, 20);
+      if (!c) continue;
+      if (c[2] < inner + baseR) continue;
       let clash = false;
       for (const L of lakes) {
-        if (Math.hypot(x - L.cx, y - L.cy) < baseR + L.r + 40) { clash = true; break; }
+        if (Math.hypot(c[0] - L.cx, c[1] - L.cy) < baseR + L.r + 40) { clash = true; break; }
       }
       if (clash) continue;
-      placed = makeLake(x, y, baseR, rng);
+      placed = makeLake(c[0], c[1], baseR, rng);
       break;
     }
     if (placed) lakes.push(placed);
   }
-  const inLake = (x, y, pad2) => {
-    for (const L of lakes) if (Math.hypot(x - L.cx, y - L.cy) < L.r + pad2) return true;
+  const inLake = (x, y, pad) => {
+    for (const L of lakes) {
+      const dx = x - L.cx, dy = y - L.cy;
+      const rr = L.r + pad;
+      if (dx * dx + dy * dy < rr * rr) return true;
+    }
     return false;
   };
 
-  // ---- forests: CLUSTERS, not a uniform sprinkle. Pick cluster centres in the
-  // grass, then scatter N trees of varied size around each.
-  const nClusters = Math.max(4, Math.min(240, Math.round(area / 1.2e6 * fl.forest)));
-  for (let c = 0; c < nClusters; c++) {
-    const centre = samplePoint(rng, bb, distFn, roadClear + 24, ramp, minP, 30);
-    if (!centre) continue;
-    const [ccx, ccy] = centre;
-    if (inLake(ccx, ccy, 40)) continue;
-    const clusterR = 55 + rng() * 120;
-    const nTrees = 6 + Math.floor(rng() * 12);
-    for (let k = 0; k < nTrees; k++) {
-      const ang = rng() * TAU, rad = Math.sqrt(rng()) * clusterR;
-      const x = ccx + Math.cos(ang) * rad, y = ccy + Math.sin(ang) * rad;
-      const r = 9 + rng() * 12 + (rng() < 0.12 ? 6 : 0);
-      if (distFn(x, y) <= roadClear + r) continue;     // canopy fully off road
-      if (inLake(x, y, r + 4)) continue;
-      trees.push([x, y, r, Math.floor(rng() * PALETTE.trees.length)]);
+  // ---- the dense forest band. Trees on a jittered grid that FOLLOWS the track:
+  // walk the centerline, and at each step lay a column of trees out along the
+  // normal on BOTH sides, from the corridor edge to the band's outer edge. Every
+  // candidate is validated against the true distToTrack, so the band stays a
+  // constant-width corridor even where the track loops back near itself, and
+  // nothing lands in the grass gap. Spacing is chosen so the biggest track lands
+  // near TARGET_CAND candidates; the floor keeps small tracks densely wooded.
+  const sp = Math.max(MIN_SP / fl.forest,
+    Math.sqrt(2 * FOREST_W * TRACK_LEN / TARGET_CAND));
+  const nRows = Math.max(1, Math.round(FOREST_W / sp));
+  const rowStep = FOREST_W / nRows;
+  const trees = [];
+  outerWalk:
+  for (let arc = 0; arc < TRACK_LEN; arc += sp) {
+    const i = track.indexAtArc(arc);
+    const p = CENTER[i], q = CENTER[(i + 1) % N];
+    let tx = q[0] - p[0], ty = q[1] - p[1];
+    const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
+    const nx = -ty, ny = tx;
+    for (let side = -1; side <= 1; side += 2) {
+      for (let row = 0; row < nRows; row++) {
+        const o = inner + (row + 0.5) * rowStep + (rng() - 0.5) * rowStep * 0.7;
+        const jt = (rng() - 0.5) * sp * 0.7;
+        const x = p[0] + tx * jt + nx * side * o;
+        const y = p[1] + ty * jt + ny * side * o;
+        const d = dist(x, y);
+        if (d < inner || d > outer) continue;
+        if (inLake(x, y, 6) || inClearing(x, y)) continue;
+        const r = rowStep * 0.5 + rng() * rowStep * 0.35;
+        trees.push([x, y, Math.max(8, r), Math.floor(rng() * PALETTE.trees.length)]);
+        if (trees.length >= TREE_CAP) break outerWalk;
+      }
     }
   }
 
-  // ---- rocks / boulders: individual scatter, some larger.
-  const nRocks = Math.round(area / 5.5e5 * fl.rock);
-  for (let i = 0; i < nRocks; i++) {
-    const p = samplePoint(rng, bb, distFn, roadClear, ramp, minP, 20);
-    if (!p) continue;
-    const r = 4 + rng() * 8 + (rng() < 0.15 ? 5 : 0);
-    if (p[2] <= roadClear + r || inLake(p[0], p[1], r + 3)) continue;
-    rocks.push([p[0], p[1], r, Math.floor(rng() * PALETTE.rocks.length)]);
-  }
-
-  // ---- bushes / shrubs: individual scatter.
-  const nBushes = Math.round(area / 4.5e5 * fl.bush);
-  for (let i = 0; i < nBushes; i++) {
-    const p = samplePoint(rng, bb, distFn, roadClear, ramp, minP, 20);
-    if (!p) continue;
-    const r = 5 + rng() * 9;
-    if (p[2] <= roadClear + r || inLake(p[0], p[1], r + 3)) continue;
-    bushes.push([p[0], p[1], r, Math.floor(rng() * PALETTE.bushes.length)]);
-  }
-
-  // ---- flowers: small PATCHES of tiny dots, sparse.
-  const nPatches = Math.round(area / 7.0e5 * fl.flower);
-  for (let i = 0; i < nPatches; i++) {
-    const p = samplePoint(rng, bb, distFn, roadClear, ramp, minP, 18);
-    if (!p) continue;
-    if (inLake(p[0], p[1], 20)) continue;
-    const dots = 3 + Math.floor(rng() * 5);
-    for (let k = 0; k < dots; k++) {
-      const x = p[0] + (rng() - 0.5) * 26, y = p[1] + (rng() - 0.5) * 26;
-      if (distFn(x, y) <= roadClear + 3 || inLake(x, y, 4)) continue;
-      flowers.push([x, y, Math.floor(rng() * PALETTE.flowers.length)]);
+  // ---- rocks / bushes / flowers: in the GRASS CORRIDOR and the clearings,
+  // where they read naturally against open grass rather than under canopy.
+  // Both placers are BOUNDED (a centerline walk into the corridor, or a disc
+  // inside a clearing) rather than rejection-sampling the whole padded bbox —
+  // on the huge Cape Cruise a full-bbox scatter would spend most of its tries in
+  // empty space far from the corridor and dominate the build time.
+  const placeCorridor = (n, make) => {
+    let made = 0, tries = 0, cap = n * 8;
+    while (made < n && tries < cap) {
+      tries++;
+      const i = track.indexAtArc(rng() * TRACK_LEN);
+      const p = CENTER[i], q = CENTER[(i + 1) % N];
+      let tx = q[0] - p[0], ty = q[1] - p[1];
+      const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
+      const side = rng() < 0.5 ? 1 : -1;
+      const o = roadClear + 2 + rng() * (inner - roadClear - 6);
+      const x = p[0] - ty * side * o, y = p[1] + tx * side * o;
+      const d = dist(x, y);
+      if (d <= roadClear || d >= inner) continue;   // stay in the grass corridor
+      if (inLake(x, y, 4)) continue;
+      make(x, y); made++;
     }
-  }
+  };
+  const placeClearings = (n, make) => {
+    if (!clearings.length) return;
+    let made = 0, tries = 0, cap = n * 10;
+    while (made < n && tries < cap) {
+      tries++;
+      const c = clearings[Math.floor(rng() * clearings.length)];
+      const ang = rng() * TAU, rad = Math.sqrt(rng()) * c.r;
+      const x = c.cx + Math.cos(ang) * rad, y = c.cy + Math.sin(ang) * rad;
+      if (!inClearing(x, y)) continue;
+      const d = dist(x, y);
+      if (d <= roadClear || inLake(x, y, 4)) continue;
+      make(x, y); made++;
+    }
+  };
+  const rocks = [], bushes = [], flowers = [];
+  const mkRock = (x, y) => rocks.push([x, y, 4 + rng() * 9, Math.floor(rng() * PALETTE.rocks.length)]);
+  const mkBush = (x, y) => bushes.push([x, y, 5 + rng() * 9, Math.floor(rng() * PALETTE.bushes.length)]);
+  const mkFlower = (x, y) => flowers.push([x, y, Math.floor(rng() * PALETTE.flowers.length)]);
+  const nRock = Math.round(TRACK_LEN / 60 * fl.rock);
+  const nBush = Math.round(TRACK_LEN / 55 * fl.bush);
+  const nFlower = Math.round(TRACK_LEN / 30 * fl.flower);
+  // ~65% in the corridor beside the road, ~35% out in the clearings.
+  placeCorridor(Math.round(nRock * 0.65), mkRock); placeClearings(nRock - Math.round(nRock * 0.65), mkRock);
+  placeCorridor(Math.round(nBush * 0.65), mkBush); placeClearings(nBush - Math.round(nBush * 0.65), mkBush);
+  placeCorridor(Math.round(nFlower * 0.6), mkFlower); placeClearings(nFlower - Math.round(nFlower * 0.6), mkFlower);
 
   return {
     sig: TRACK_SIGNATURE,
-    bounds: { ...bb },
-    lakes, trees, rocks, bushes, flowers,
+    meta: {
+      gap: GAP, forestWidth: FOREST_W,
+      inner, outer, spacing: +sp.toFixed(1), rows: nRows,
+    },
+    lakes, clearings, trees, rocks, bushes, flowers,
     counts: {
-      lakes: lakes.length, trees: trees.length, rocks: rocks.length,
-      bushes: bushes.length, flowers: flowers.length,
+      lakes: lakes.length, clearings: clearings.length, trees: trees.length,
+      rocks: rocks.length, bushes: bushes.length, flowers: flowers.length,
     },
   };
 }

@@ -205,25 +205,36 @@ story on the other two (33.5 s vs 12.75 s; 21.5 s vs 10.83 s).
 
 ### World / scenery
 
-The grass around the track is dressed with **purely decorative** scenery —
-irregular **lakes** (organic jittered blobs with a sand shore, the odd island and
-reed tufts), **forests** scattered as *clusters* of shaded canopies with a soft
-offset shadow, plus **rocks, bushes and flower patches**. None of it is physics:
-it never collides, never touches the racing surface and has no effect on driving
-or the bots.
+Every track sits in a **grassy corridor inside a dense forest**, all **purely
+decorative** — no physics, no collision, no effect on driving or the bots.
+Around the road is a clear **grass corridor** (a tree-free ring, `GAP` = 175 px
+beyond the road edge), and beyond it a **dense forest band** of finite width
+(`FOREST_W` = 600 px) of packed, shaded canopies with a soft offset shadow. The
+band **follows the track on both sides** — the outside *and* the loop interior —
+so the world hugs the corridor rather than filling the whole map, which also
+bounds the tree count. Punched into the forest are occasional blob-shaped grass
+**clearings**, and the odd **lake** (an organic jittered blob with a sand shore,
+sometimes an island and reeds) sited out in the forest as a natural watery
+clearing. **Rocks, bushes and flowers** dress the grass corridor and the
+clearings.
 
-It is **procedural per track** (`decor.js`): every item is placed from the
-track's own bounding box and `distToTrack` using a seeded PRNG keyed on
-`TRACK_SIGNATURE`, so a track's scenery is identical across frames and reloads,
-regenerated only when the track changes and **cached per signature** (flipping
-back is instant). Density ramps up with distance from the road and everything is
-rejected within a comfortable margin of the tarmac, so the road stays the clear
-focus (measured: the nearest decoration on every circuit clears the road edge by
-~47 px or more). Counts scale with track size — the short circuits are sparse
-(~37 trees, few/no lakes), Cape Cruise is a lush ~1 500 trees / 16 lakes — with a
-light automatic per-track flavour (cruise gets the most water and forest). The
-draw loop is **viewport-culled** (only items within the visible radius are
-drawn), so hundreds of trees stay at 60 fps. The minimap is left clean.
+It is **procedural per track** (`decor.js`): trees are laid on a jittered grid
+walked along the centerline and offset out into the band, every position
+**validated against `distToTrack`** so the corridor stays a constant-width ring
+even where a track loops back near itself and **nothing lands in the grass gap**
+(measured: every sampled tree centre clears `ROAD_HALF + GAP`, zero violations on
+all four circuits). Everything is seeded on `TRACK_SIGNATURE`, so a track's
+scenery is identical across frames and reloads, regenerated only on a track
+change and **cached per signature** (flipping back is instant). Tree **spacing is
+chosen from track length** so the biggest circuit lands near a target candidate
+count and small circuits stay densely wooded, with a hard **cap (≤ 14 000
+trees)**; a light automatic per-track flavour tunes density, lakes and clearings
+(cruise gets the most). Rough per-track counts: **Ember ~1 650 trees / 3
+clearings / 1 lake, Longshore ~3 100 / 3 / 1, Lantern ~940 / 3 / 1, Cape Cruise
+~12 900 / 14 / 9**. Generation is bounded and fast (Cape Cruise builds in
+~430 ms, once, then cached), and the draw loop is **viewport-culled** — only
+items within the visible radius are drawn, so even ~13 000 trees cost ~0.1 ms a
+frame. The minimap is left clean.
 
 ## The three circuits
 
@@ -860,9 +871,11 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   launch spreads the field — memoised on (car spec + `TRACK_SIGNATURE`) in an
   8-slot LRU so re-grids are free, only an upgrade purchase re-runs the physics,
   and flipping back to a circuit you were just on is instant.
-- `decor.js` — **purely cosmetic** world scenery (lakes, forests, rocks, bushes,
-  flowers). Generates a track's decoration from its bounding box + `distToTrack`
-  and a seeded PRNG keyed on `TRACK_SIGNATURE`, cached per signature; no DOM
+- `decor.js` — **purely cosmetic** world scenery: a dense **forest band** hugging
+  a **grass corridor** around the track, with clearings, lakes, rocks, bushes and
+  flowers. Generates a track's decoration from its centerline + bounding box +
+  `distToTrack` and a seeded PRNG keyed on `TRACK_SIGNATURE`, cached per
+  signature; no DOM
   (`main.js` owns the viewport-culled draw). No physics: it never touches the
   road or the cars. See *[World / scenery](#world--scenery)*.
 - `test/drive_bot.mjs` — headless bot-driver test harness (acceptance).
