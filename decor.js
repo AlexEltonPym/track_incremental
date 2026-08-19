@@ -27,8 +27,8 @@ export const PALETTE = {
   rocks: ["#585d58", "#4c514c", "#646a63"],
   bushes: ["#3a5233", "#46603c", "#324a2e"],
   flowers: ["#c9b24a", "#c88a5e", "#b0698a", "#c7c2a0"],
-  water: "#2e4d66",
-  waterEdge: "rgba(20,36,50,0.55)",
+  water: "#4b86ad",
+  waterEdge: "rgba(38,64,86,0.45)",
   shore: "#7d7856",       // muted sand ring around a lake
   island: "#33502c",
   reed: "rgba(60,86,52,0.7)",
