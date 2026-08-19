@@ -203,6 +203,28 @@ that path is 1 856 px (79% of the lap) but **entirely on grass**, so the best
 conceivable time on it is **22.0 s** against PRO's real **9.78 s** lap. Same
 story on the other two (33.5 s vs 12.75 s; 21.5 s vs 10.83 s).
 
+### World / scenery
+
+The grass around the track is dressed with **purely decorative** scenery —
+irregular **lakes** (organic jittered blobs with a sand shore, the odd island and
+reed tufts), **forests** scattered as *clusters* of shaded canopies with a soft
+offset shadow, plus **rocks, bushes and flower patches**. None of it is physics:
+it never collides, never touches the racing surface and has no effect on driving
+or the bots.
+
+It is **procedural per track** (`decor.js`): every item is placed from the
+track's own bounding box and `distToTrack` using a seeded PRNG keyed on
+`TRACK_SIGNATURE`, so a track's scenery is identical across frames and reloads,
+regenerated only when the track changes and **cached per signature** (flipping
+back is instant). Density ramps up with distance from the road and everything is
+rejected within a comfortable margin of the tarmac, so the road stays the clear
+focus (measured: the nearest decoration on every circuit clears the road edge by
+~47 px or more). Counts scale with track size — the short circuits are sparse
+(~37 trees, few/no lakes), Cape Cruise is a lush ~1 500 trees / 16 lakes — with a
+light automatic per-track flavour (cruise gets the most water and forest). The
+draw loop is **viewport-culled** (only items within the visible radius are
+drawn), so hundreds of trees stay at 60 fps. The minimap is left clean.
+
 ## The three circuits
 
 Each one is defined in `track.js` as a closed path of straights and arcs — the
@@ -838,6 +860,11 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   launch spreads the field — memoised on (car spec + `TRACK_SIGNATURE`) in an
   8-slot LRU so re-grids are free, only an upgrade purchase re-runs the physics,
   and flipping back to a circuit you were just on is instant.
+- `decor.js` — **purely cosmetic** world scenery (lakes, forests, rocks, bushes,
+  flowers). Generates a track's decoration from its bounding box + `distToTrack`
+  and a seeded PRNG keyed on `TRACK_SIGNATURE`, cached per signature; no DOM
+  (`main.js` owns the viewport-culled draw). No physics: it never touches the
+  road or the cars. See *[World / scenery](#world--scenery)*.
 - `test/drive_bot.mjs` — headless bot-driver test harness (acceptance).
 
 There is no `bot_ghosts.json` and no ghost exporter any more: the game

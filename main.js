@@ -19,6 +19,9 @@ import {
   TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
 } from "./track.js?v=9";
 import { botField } from "./bots.js?v=9";
+// Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
+// per track from geometry + a seeded PRNG and cached. Rendered under the road.
+import { getDecor, PALETTE } from "./decor.js?v=1";
 
 // ---------------------------------------------------------------- constants
 
@@ -787,9 +790,106 @@ function drawCar(x, y, angle, alpha, bodyColor) {
   ctx.restore();
 }
 
+// Cosmetic scenery, drawn in WORLD space UNDER the road (grass backdrop is
+// already painted in screen space by render()). Everything is VIEWPORT-CULLED:
+// only items within the visible radius are touched, so a track with hundreds of
+// trees (Cape Cruise) still costs only what is on screen. No allocation here —
+// the decoration arrays are precomputed and cached in decor.js.
+function drawDecor() {
+  const decor = getDecor(T.TRACK);
+  // Visible radius: half the canvas diagonal in WORLD px (the camera rotates,
+  // so a circular bound is rotation-proof), plus a margin for item size.
+  const viewR = Math.hypot(CANVAS_W, CANVAS_H) / (2 * camera.zoom) + 60;
+  const cx = camera.x, cy = camera.y;
+  const vis = (x, y, r) => {
+    const dx = x - cx, dy = y - cy, rr = viewR + r;
+    return dx * dx + dy * dy <= rr * rr;
+  };
+
+  // ---- lakes: shore ring, then water, then island + reeds.
+  for (const L of decor.lakes) {
+    if (!vis(L.cx, L.cy, L.r)) continue;
+    ctx.beginPath();
+    ctx.moveTo(L.shore[0][0], L.shore[0][1]);
+    for (let i = 1; i < L.shore.length; i++) ctx.lineTo(L.shore[i][0], L.shore[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = PALETTE.shore;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(L.poly[0][0], L.poly[0][1]);
+    for (let i = 1; i < L.poly.length; i++) ctx.lineTo(L.poly[i][0], L.poly[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = PALETTE.water;
+    ctx.fill();
+    ctx.strokeStyle = PALETTE.waterEdge;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    if (L.island) {
+      ctx.beginPath();
+      ctx.moveTo(L.island[0][0], L.island[0][1]);
+      for (let i = 1; i < L.island.length; i++) ctx.lineTo(L.island[i][0], L.island[i][1]);
+      ctx.closePath();
+      ctx.fillStyle = PALETTE.island;
+      ctx.fill();
+    }
+    if (L.reeds.length) {
+      ctx.strokeStyle = PALETTE.reed;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (const [rx, ry] of L.reeds) { ctx.moveTo(rx, ry); ctx.lineTo(rx, ry - 6); }
+      ctx.stroke();
+    }
+  }
+
+  // ---- trees: all shadows first (one fill), then canopies. Offset shadow gives
+  // a subtle hint of depth without a per-tree state change for the shadow.
+  ctx.fillStyle = PALETTE.treeShadow;
+  for (const t of decor.trees) {
+    if (!vis(t[0], t[1], t[2])) continue;
+    ctx.beginPath();
+    ctx.arc(t[0] + 3, t[1] + 4, t[2], 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const t of decor.trees) {
+    if (!vis(t[0], t[1], t[2])) continue;
+    ctx.fillStyle = PALETTE.trees[t[3]];
+    ctx.beginPath();
+    ctx.arc(t[0], t[1], t[2], 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ---- bushes, then rocks: small filled blobs.
+  for (const b of decor.bushes) {
+    if (!vis(b[0], b[1], b[2])) continue;
+    ctx.fillStyle = PALETTE.bushes[b[3]];
+    ctx.beginPath();
+    ctx.arc(b[0], b[1], b[2], 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const r of decor.rocks) {
+    if (!vis(r[0], r[1], r[2])) continue;
+    ctx.fillStyle = PALETTE.rocks[r[3]];
+    ctx.beginPath();
+    ctx.arc(r[0], r[1], r[2], 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ---- flowers: tiny dots.
+  for (const f of decor.flowers) {
+    if (!vis(f[0], f[1], 2)) continue;
+    ctx.fillStyle = PALETTE.flowers[f[2]];
+    ctx.beginPath();
+    ctx.arc(f[0], f[1], 1.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 function renderWorld() {
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
+
+  // Cosmetic scenery in the grass, BEHIND everything on the road.
+  drawDecor();
 
   // THE CONCRETE RUNOFF, first: a distinct pale-grey skirt on the outside of
   // the demanding corners, drawn UNDER the road edge line so the edge still
@@ -1147,6 +1247,7 @@ function switchTrack(id) {
   if (id === state.currentTrack || !state.tracks[id] || !state.unlocked.has(id)) return;
   T.setTrack(id);
   state.currentTrack = id;
+  getDecor(T.TRACK);            // build+cache this track's scenery up front
   fitMinimap();
   marks.length = 0;             // rubber belongs to the track it was laid on
   ghostMarks.length = 0;
@@ -1356,6 +1457,7 @@ function hideMenu() { el("startOverlay").style.display = "none"; }
 
 load();
 T.setTrack(state.currentTrack);
+getDecor(T.TRACK);             // build+cache the initial track's scenery
 fitMinimap();
 resetCar();
 params = carParams(state.drivingLevels);
@@ -1378,6 +1480,8 @@ window.__game = {
     cps: CHECKPOINTS.length, sig: T.TRACK_SIGNATURE }; },
   get tracks() { return TRACKS; },
   get botGhosts() { return botGhosts; },
+  // Generated cosmetic scenery for the ACTIVE track (world coords), for preview.
+  get decor() { return getDecor(T.TRACK); },
   get simMs() { return lastSimMs; },
   refreshBotField,
   get params() { return params; },
