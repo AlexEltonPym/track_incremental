@@ -51,6 +51,80 @@ const DEG = Math.PI / 180;
 //             ["a", radius, degrees, name?]       arc (deg > 0 = right/CW)
 // `name` (when given) becomes a SECTOR, used by the harness to report where a
 // bot brakes or runs wide.
+
+// ---------------------------------------------------------------- CAPE CRUISE
+//
+// THE FOURTH CIRCUIT — deliberately in a different class from the other three:
+// much LONGER, much WINDIER and far more RELAXED. A scenic coastal cruise, not
+// a technical circuit: a wide road, long flowing straights and big gentle
+// sweepers (every radius >= 380 px, nothing tight or technical), so the timid
+// NOVICE bot laps it comfortably and there is no dominant upgrade to express —
+// it is a place to drive, not an income source (see README). Because a lap is
+// several times longer than the others, it is EXEMPT from the specialist-
+// differentiation gates and gets only a small, cheap check set in the harness,
+// and the bot field records FEWER, longer laps (see bots.js fieldLaps()).
+//
+// HOW IT CLOSES. A closed track has to return to its start in BOTH position and
+// heading, which is fiddly to hand-solve for a long meandering path. So the
+// circuit is built from ONE windy half that nets exactly -180 degrees of
+// turning, then DUPLICATED: running the same relative sequence again from a
+// pose already rotated 180 degrees traces the point-symmetric second half and
+// lands back on the start pose EXACTLY (two 180-degrees rotations compose to the
+// identity), for ANY such half. That lets the corners be placed freely — the
+// only rule the half must obey is "arc degrees sum to -180".
+const CRUISE = (() => {
+  // The windy first half. Arc degrees: -45+20-50+25-48+42-60-64 = -180
+  // (the half MUST net exactly -180 for the duplicated loop to close).
+  // A mix of "working" sweepers (radius 260-300, a mild lift below top speed so
+  // the bot tiers separate and the runoff has somewhere to sit) and grand
+  // flowing bends (radius 420-600, flat out — pure scenery). Every radius is
+  // large and every corner short enough that no slide can ever bank a charge
+  // here (verified across the whole upgrade range), so PRO+ plans no drift and
+  // there is no dominant upgrade — exactly the point of a chill cruise. Long
+  // straights carry the length; nothing is tight or technical.
+  const half = [
+    ["s", 3600, "the coast straight"],
+    ["a", 280, -45, "Sea Point sweeper"],
+    ["s", 2800, "the long reach"],
+    ["a", 560, 20, "the inlet bend"],
+    ["s", 1800],
+    ["a", 300, -50, "Gull Point"],
+    ["s", 3200, "the bay straight"],
+    ["a", 600, 25, "the dune kink"],
+    ["s", 2100],
+    ["a", 260, -48, "Smugglers Cove"],
+    ["s", 2900, "the headland straight"],
+    ["a", 300, 42, "the marsh bend"],
+    ["s", 2000],
+    ["a", 580, -60, "the cliffs"],
+    ["a", 420, -64, "the point"],
+    ["s", 2400, "the marina straight"],
+  ];
+  // Point-symmetric return half: the same shape, names suffixed so each sector
+  // stays distinct in the telemetry.
+  const back = half.map(s => s[0] === "s"
+    ? (s[2] ? ["s", s[1], s[2] + " (return)"] : ["s", s[1]])
+    : ["a", s[1], s[2], s[3] + " (return)"]);
+  return {
+    id: "cruise",
+    name: "CAPE CRUISE",
+    short: "Cruise",
+    skill: "cruise",
+    skillLabel: "Scenic cruise",
+    // Wide and forgiving — the widest road on any circuit.
+    roadHalf: 52,
+    start: [1200, 4200], heading: 0,
+    // Coarser sampling than the others (large radii and long straights need no
+    // dense control points), which keeps the centerline point count — and with
+    // it the broad-phase grid build and the per-tick nearest-point search — in
+    // the same ballpark as the short circuits despite the much greater length.
+    spacing: 60, samples: 4,
+    // Six gates spread around the big loop, on corner apexes.
+    checkpoints: [[1, 0.5], [7, 0.5], [13, 0.5], [17, 0.5], [23, 0.5], [29, 0.5]],
+    segs: [...half, ...back],
+  };
+})();
+
 export const TRACK_DEFS = [
   {
     id: "ember",
@@ -177,6 +251,7 @@ export const TRACK_DEFS = [
       ["s", 91, "the run to the line"],
     ],
   },
+  CRUISE,
 ];
 
 // Metadata only, for the UI's track selector.
@@ -256,8 +331,16 @@ export function buildCenterline(pts, samplesPerSeg) {
 //
 // Everything derived from one definition. Pure: two calls with the same
 // definition produce identical data, and nothing here touches module state.
-const GRID_CELL = 32;
+const GRID_CELL = 32;      // the SHORT tracks' cell size (also the floor)
 const GRID_REACH = 80;     // px of segments kept per cell; beyond this, rescan
+// Target broad-phase cell count. On a small circuit the 32 px floor wins and
+// the grid is unchanged; on the huge cape cruise (a bounding box tens of times
+// larger) the cell GROWS so the cell count — and thus buildTrack's grid pass —
+// stays bounded instead of ballooning into millions of cells. Cell size never
+// changes a query's answer (within GRID_REACH the shortlist is provably
+// complete; beyond it there is an exact full-scan fallback), so the short
+// tracks stay byte-identical.
+const GRID_TARGET_CELLS = 9000;
 
 // F1 STARTING-GRID spacing (see gridSlot). Single-file staggered: each car a
 // car-length-plus-gap further back than the one ahead, with a lateral zigzag.
@@ -519,23 +602,28 @@ export function buildTrack(def) {
   // grid cell caches the segments that could possibly be nearest to a point
   // inside it. Queries far from the track (deep in the grass, or outside the
   // grid) fall back to the full scan, so the answer is always exactly the same.
+  // Bounding box first, then an adaptive cell size (see GRID_TARGET_CELLS).
+  let _minX = Infinity, _minY = Infinity, _maxX = -Infinity, _maxY = -Infinity;
+  for (const p of CENTER) {
+    if (p[0] < _minX) _minX = p[0];
+    if (p[0] > _maxX) _maxX = p[0];
+    if (p[1] < _minY) _minY = p[1];
+    if (p[1] > _maxY) _maxY = p[1];
+  }
+  const CELL = Math.max(GRID_CELL, 8 * Math.round(
+    Math.sqrt((_maxX - _minX + 2 * GRID_REACH) * (_maxY - _minY + 2 * GRID_REACH) /
+      GRID_TARGET_CELLS) / 8));
   const GRID = (() => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of CENTER) {
-      if (p[0] < minX) minX = p[0];
-      if (p[0] > maxX) maxX = p[0];
-      if (p[1] < minY) minY = p[1];
-      if (p[1] > maxY) maxY = p[1];
-    }
+    let minX = _minX, minY = _minY, maxX = _maxX, maxY = _maxY;
     const bounds = { minX, minY, maxX, maxY };
     minX -= GRID_REACH; minY -= GRID_REACH;
-    const cols = Math.ceil((maxX + GRID_REACH - minX) / GRID_CELL);
-    const rows = Math.ceil((maxY + GRID_REACH - minY) / GRID_CELL);
+    const cols = Math.ceil((maxX + GRID_REACH - minX) / CELL);
+    const rows = Math.ceil((maxY + GRID_REACH - minY) / CELL);
     const cells = new Array(cols * rows);
-    const reach2 = (GRID_REACH + GRID_CELL) * (GRID_REACH + GRID_CELL);
+    const reach2 = (GRID_REACH + CELL) * (GRID_REACH + CELL);
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const cx = minX + (c + 0.5) * GRID_CELL, cy = minY + (r + 0.5) * GRID_CELL;
+        const cx = minX + (c + 0.5) * CELL, cy = minY + (r + 0.5) * CELL;
         const list = [];
         for (let i = 0; i < N; i++) if (segDist2(i, cx, cy) <= reach2) list.push(i);
         cells[r * cols + c] = list;
@@ -552,8 +640,8 @@ export function buildTrack(def) {
   const NEAR = { dist: 0, idx: 0, t: 0, side: 1 };
   const closest = (x, y) => {
     let best = Infinity, bi = 0, bt = 0, bs = 1, done = false;
-    const c = Math.floor((x - GRID.minX) / GRID_CELL);
-    const r = Math.floor((y - GRID.minY) / GRID_CELL);
+    const c = Math.floor((x - GRID.minX) / CELL);
+    const r = Math.floor((y - GRID.minY) / CELL);
     if (c >= 0 && r >= 0 && c < GRID.cols && r < GRID.rows) {
       const list = GRID.cells[r * GRID.cols + c];
       for (let k = 0; k < list.length; k++) {

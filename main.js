@@ -5,7 +5,7 @@
 import {
   TICK, SURFACE, carParams, createCarState, stepCar,
   UPGRADE_DEFS, upgradeCost, insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "./physics.js?v=6";
+} from "./physics.js?v=7";
 // track.js exports the ACTIVE track's geometry as ES module live bindings, so
 // these names follow setTrack() with no re-import and no plumbing.
 // NOTE: the ?v= query on every internal import is deliberate cache-busting for
@@ -13,17 +13,26 @@ import {
 // will otherwise serve a STALE module for a bare URL like "./bots.js" while a
 // sibling ("./track.js") is fresh — a split that once left the F1 grid slots
 // computed but unused. Bump this token (and SAVE_VERSION) together on release.
-import * as T from "./track.js?v=6";
+import * as T from "./track.js?v=7";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
   TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
-} from "./track.js?v=6";
-import { botField } from "./bots.js?v=6";
+} from "./track.js?v=7";
+import { botField } from "./bots.js?v=7";
 
 // ---------------------------------------------------------------- constants
 
 const CANVAS_W = 960, CANVAS_H = 620;
-const MAX_LAP_TICKS = 60 * 300;   // abort recording after 5 minutes
+// A safety cap that ABORTS an in-progress lap recording if it runs absurdly
+// long (a parked car, a stuck player). It has to be TRACK-AWARE: 5 minutes is
+// ample for the short circuits but would abort a legitimate lap of the ~2.8-min
+// Cape Cruise if a casual driver dawdles, throwing away their earning-ghost
+// lap. So it is the larger of 5 minutes and a generous multiple of the active
+// track's own length (a full lap even at a crawl, plus slack). The short tracks
+// are dominated by the 5-minute floor, so nothing about them changes.
+function maxLapTicks() {
+  return Math.max(60 * 300, Math.round(T.TRACK_LEN / 40 * 60 * 2));
+}
 
 // ENDLESS RACING. There is no fixed race length any more: the START menu runs a
 // 3-2-1-GO countdown, everyone launches from the F1 grid at GO (even with no
@@ -50,7 +59,17 @@ const DRIVING_IDS = ["speed", "accel", "grip", "boostPwr", "boostDur"];
 // second map is an early goal and the third a real project. Every unlocked
 // track's ghost fleet then earns simultaneously, so unlocking grows total
 // income — that is the progression.
-const UNLOCK_COSTS = { ember: 0, longshore: 4000, lantern: 15000 };
+// CAPE CRUISE is unlocked by default (cost 0): it is a test/cruise level, not a
+// milestone. Its income is intrinsically near-zero — payout = round(720 /
+// lapSeconds) x mult, which for a ~2.8-minute lap rounds to ~1 cr per loop — so
+// it is a place to drive, not an income source. That is expected for a test
+// level (see README).
+const UNLOCK_COSTS = { ember: 0, longshore: 4000, lantern: 15000, cruise: 0 };
+
+// The tracks that start unlocked: everything priced at 0.
+function freeTracks() {
+  return TRACKS.filter(t => (UNLOCK_COSTS[t.id] ?? Infinity) === 0).map(t => t.id);
+}
 
 // ---------------------------------------------------------------- persistence
 // PROTOTYPING MODE. With PERSISTENCE = false the game never reads or writes
@@ -142,7 +161,7 @@ const state = {
   credits: 0,
   drivingLevels: { speed: 0, accel: 0, grip: 0, boostPwr: 0, boostDur: 0 },
   currentTrack: DEFAULT_TRACK,
-  unlocked: new Set([DEFAULT_TRACK]),   // Ember free; the rest are bought
+  unlocked: new Set(freeTracks()),   // Ember + Cape Cruise free; the rest are bought
   tracks: Object.fromEntries(TRACKS.map(t => [t.id, blankTrackState()])),
   car: createCarState(START_POS.x, START_POS.y, START_ANGLE),
   lap: createLap(),
@@ -395,8 +414,9 @@ function load() {
         state.drivingLevels[id] = d.drivingLevels[id];
       }
     }
-    // Unlocks. Ember is always in; unknown ids are ignored.
-    state.unlocked = new Set([DEFAULT_TRACK]);
+    // Unlocks. The free tracks (Ember + Cape Cruise) are always in; unknown
+    // ids are ignored.
+    state.unlocked = new Set(freeTracks());
     for (const id of d.unlocked || []) if (state.tracks[id]) state.unlocked.add(id);
     if (d.currentTrack && state.unlocked.has(d.currentTrack)) state.currentTrack = d.currentTrack;
     // Per-track economy. Unknown ids are ignored; a track with no entry stays
@@ -609,7 +629,7 @@ function physicsStep() {
   const ev = advanceLap(state.lap, px, py, c.x, c.y);
   if (state.lap.active && !ev.started) {
     state.lapRec.push([c.x, c.y, c.angle]);
-    if (state.lap.ticks > MAX_LAP_TICKS) { state.lap.active = false; state.lapRec = []; }
+    if (state.lap.ticks > maxLapTicks()) { state.lap.active = false; state.lapRec = []; }
   }
   if (ev.finished && ev.finished.valid) {
     // ECONOMY on a clean lap:

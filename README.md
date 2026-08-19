@@ -6,10 +6,16 @@ laps** each replay forever as earning ghosts — ghost #1 is your best lap, #2
 your second best, and so on — paying credits that buy car upgrades and unlock
 more circuits, each of which then earns income at the same time.
 
-**Three circuits**, each built so a *different* upgrade is the dominant lever:
-EMBER LOOP rewards the drift boost, LONGSHORE SPEEDWAY rewards top speed,
+**Three designed circuits**, each built so a *different* upgrade is the dominant
+lever: EMBER LOOP rewards the drift boost, LONGSHORE SPEEDWAY rewards top speed,
 LANTERN COIL rewards grip. That is measured, not asserted — see
 *[The three circuits](#the-three-circuits)*.
+
+…plus a **fourth, in a different class entirely: CAPE CRUISE** — a much longer,
+windier, more relaxed scenic loop (a ~2.8-minute bot lap against the others'
+~10–13 s), unlocked from the start, deliberately with *no* dominant upgrade. It
+is a place to drive, not a circuit to master. See *[Cape Cruise, the fourth
+circuit](#cape-cruise-the-fourth-circuit)*.
 
 Plain HTML + JS + canvas. No dependencies, no build step.
 
@@ -76,10 +82,11 @@ back to `true` and saving works exactly as before.
 - **G** — toggle the NOVICE/MID/PRO/PRO+ bot reference ghosts
 - **Mouse scroll wheel** (over the track) — zoom out to survey most of the
   track, or back in (reset by a refresh while persistence is off)
-- **Track buttons** (top of the side panel: Ember / Longshore / Lantern) —
-  switch circuit, or **unlock** a locked one. Ember is unlocked from the start;
-  Longshore (**4,000 cr**) and Lantern (**15,000 cr**) show a 🔒 and their
-  unlock price until bought, greying out until you can afford them. Switching an
+- **Track buttons** (top of the side panel: Ember / Longshore / Lantern /
+  Cruise) — switch circuit, or **unlock** a locked one. Ember **and Cape Cruise**
+  are unlocked from the start; Longshore (**4,000 cr**) and Lantern (**15,000
+  cr**) show a 🔒 and their unlock price until bought, greying out until you can
+  afford them. Switching an
   unlocked circuit re-simulates its bot field (cached per track, so flipping
   back is instant), re-grids + counts you in, and shows that circuit's own
   records, ghosts and per-track upgrades
@@ -420,6 +427,72 @@ The corner-feasibility numbers are easy to check: `findCorners()` and
 car spec, so a scratch script can print every corner's arc length against its
 tier-1 charge requirement across the whole upgrade range.
 
+## Cape Cruise, the fourth circuit
+
+The other three are ~2.2–3.5 k px with 10–13 s bot laps, each a tight little
+skill-expression track. **CAPE CRUISE is the opposite of all of that**: a
+**46,506 px** scenic coastal loop with a **~2.8-minute** bot lap (167 s for PRO,
+173 s for NOVICE), a **wide 104 px road**, long flowing straights and eight big
+gentle sweepers — every radius ≥ 260 px, nothing tight or technical, generous
+runoff. It exists to be *cruised*: the timid NOVICE bot laps it with **0.00 %**
+of its time off-road, and there is **no dominant upgrade to express** — most of
+the lap is spent flat-out on straights, so the specialist levers barely move.
+It is unlocked from the start.
+
+**How it is shaped.** A closed loop has to return to its start in both position
+*and* heading, which is fiddly to hand-solve for a long meandering path. So the
+circuit is defined as **one windy half that nets exactly −180° of turning, then
+duplicated**: running that same relative sequence again from a pose already
+rotated 180° traces the point-symmetric second half and lands back on the start
+pose *exactly* (two 180° rotations compose to the identity), for **any** such
+half. That is what let the corners be placed freely — the only rule the half
+obeys is "arc degrees sum to −180" (`CRUISE` in `track.js`). It reuses every
+piece of the derived machinery for free: centerline, gates, sectors, F1 grid
+slots, and the geometry-derived concrete runoff (~13 % of the lap, on the
+outsides of the tighter sweepers).
+
+### Why a 50×-longer track needed engineering, not just geometry
+
+A multi-minute lap breaks assumptions that were safe on a 12-second one:
+
+- **Recording caps.** `main.js`'s lap-recording abort (`maxLapTicks()`) and
+  `bots.js`'s `recordRace` budget were fixed 5-minute / 2-minute-per-lap
+  constants that a long lap would blow. Both are now **track-aware** (scaled to
+  `TRACK_LEN`), so a full lap records end-to-end — the player's earning-ghost
+  lap *and* the bot recordings. The short circuits are dominated by the old
+  floors, so their behaviour is unchanged.
+- **First-visit field sim.** `simulateBotField` runs four bots' whole race on
+  the first visit (then caches). On a 2.8-min lap a 3-lap field would be a
+  multi-second freeze, so a long track records **2 laps, not 3** (a standing
+  launch + one flying lap to loop — a chill cruise does not need the extra
+  flying lap; `bots.fieldLaps()`). Measured **~560 ms in Node, ~710 ms in the
+  browser** — well under a ~2 s budget. There is also **no drift plan to race**
+  here (every corner is too gentle/short to bank a charge at any spec), which
+  keeps PRO+ to a single simulated variant.
+- **Broad-phase grid build.** The circuit's bounding box is ~14 k × 14 k px; a
+  fixed 32 px collision-grid cell would build millions of cells. The cell size
+  is now **adaptive** (`GRID_TARGET_CELLS`), sized to keep the cell *count*
+  bounded, which cut the build from ~770 ms to ~200 ms. Cell size never changes
+  a query's answer, so the short tracks (whose small bbox still yields the 32 px
+  cell) stay byte-identical.
+
+### Exempt from the differentiation gates — and the economy caveat
+
+Cape Cruise is **exempt from the specialist-differentiation gates** (the
+sensitivity / value-per-credit tables that assert "Top Speed is the biggest
+lever on Longshore", etc.) and from the heavy per-track upgrade-space sweep.
+Those gates assert a *dominant upgrade*, and this track deliberately has none —
+it is a cruise, not a skill-expression circuit. The harness iterates the three
+**designed** circuits (ember/longshore/lantern) for all of that, so adding the
+cruise cannot perturb them; the cruise instead gets a **small, cheap check set**
+(friendliness, tier-ladder ordering, basic monotonicity on a handful of specs,
+a length check, a full-lap-records check, and a field-sim-budget check) so the
+whole suite stays fast despite a multi-minute lap.
+
+**The economy caveat, stated plainly:** payout is `round(720 / lapSeconds) ×
+mult`, which for a ~167 s lap **rounds to ~1 credit per loop**. Cape Cruise is
+therefore **not an income source** — it is a test/cruise level, a place to
+drive. That is expected and intentional.
 
 ## The bot ghosts (an endless pace field, simulated live)
 
@@ -798,12 +871,15 @@ Beyond the bot laps, the suite runs six scripted feature tests:
   concrete at speed must cost under 10% in the first second
 
 Design gates lock in the balance and fail loudly if a future change undoes
-it. **Everything below the scripted physics tests runs on all three tracks**
-(the physics scripts are track-independent, so they run once), against
-simulated standing-start recordings. The suite is **136 checks in ~32 s** and
-prints a per-track bot table, a per-track summary, the per-track runoff and
-cutting report, three sweep tables, the upgrade-sensitivity table and the
-value-per-credit table. It also carries light checks on the endless-model
+it. **The friendliness / ladder / sweep / differentiation gates run on the three
+designed tracks** (the physics scripts are track-independent, so they run once),
+against simulated standing-start recordings; the **fourth circuit, Cape Cruise,
+is exempt** from the differentiation gates and gets its own small check set (see
+*[Cape Cruise](#exempt-from-the-differentiation-gates--and-the-economy-caveat)*).
+The suite is **147 checks in ~42 s** and prints a per-track bot table, a
+per-track summary, the per-track runoff and cutting report, three sweep tables,
+the upgrade-sensitivity table, the value-per-credit table and the Cape Cruise
+summary. It also carries light checks on the endless-model
 plumbing — the F1 grid slots are distinct, ordered pole→5th and on-road on
 every circuit, **and the four bots' actual simulated recordings begin at their
 assigned slots (1..4), mutually distinct** (so a "computed but unused" grid
@@ -888,7 +964,7 @@ drives.
 
 ## Current features (v6)
 
-- **Three hand-authored circuits**, each defined as a path of straights and
+- **Four hand-authored circuits**, each defined as a path of straights and
   arcs and built into a Catmull-Rom centerline + gates + sectors + collision
   grid at load, with three friendly surfaces (no hard walls) and a live-binding
   "active track" so switching is one `setTrack()` call:
@@ -896,10 +972,14 @@ drives.
   — the boost track), **LONGSHORE SPEEDWAY** (3 473 px, long straights and four
   flat-out double-apex corners — the top-speed track), **LANTERN COIL**
   (2 222 px, seven linked medium-speed corners with no straights — the grip
-  track). **Ember is unlocked from the start; Longshore (4,000 cr) and Lantern
-  (15,000 cr) are one-off credit unlocks** shown with a 🔒 and their price in
-  the selector. The bot field, the ranked best laps, the earning ghosts and the
-  per-track economy are all per track
+  track), and **CAPE CRUISE** (46 506 px, a ~2.8-minute scenic coastal loop of
+  long straights and big gentle sweepers — a chill cruise with *no* dominant
+  upgrade, exempt from the differentiation gates; see
+  *[Cape Cruise](#cape-cruise-the-fourth-circuit)*). **Ember and Cape Cruise are
+  unlocked from the start; Longshore (4,000 cr) and Lantern (15,000 cr) are
+  one-off credit unlocks** shown with a 🔒 and their price in the selector. The
+  bot field, the ranked best laps, the earning ghosts and the per-track economy
+  are all per track
 - Arcade car physics at a fixed 60 Hz timestep: smoothed speed-sensitive
   steering, damped lateral slip, unhurried acceleration (~2.7 s to 90% of
   top speed), handbrake drift with fading tire marks and a slip-angle
@@ -979,8 +1059,9 @@ drives.
   rankedLaps: [{ticks,samples}] }`) — **currently DISABLED behind `const
   PERSISTENCE = false` for prototyping**: a refresh resets everything and any
   `trackcrimental_*` key is cleared at boot
-- Headless bot-driver harness with F1-style telemetry, **136 acceptance gates
-  (~32 s)** covering all three circuits: scripted drift-boost / drift-control /
+- Headless bot-driver harness with F1-style telemetry, **147 acceptance gates
+  (~42 s)** covering all four circuits (the three designed ones in full, plus a
+  small exempt check set for Cape Cruise): scripted drift-boost / drift-control /
   exploit-regression / brake-gate / three-surface feature tests, per-circuit
   gate-rule and cut-the-corner regressions, runoff placement checked from the
   derived width arrays, per-track upgrade-space sweeps asserting bot ordering

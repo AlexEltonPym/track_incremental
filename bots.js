@@ -15,8 +15,8 @@
 // ?v= cache-busting: keep in lockstep with main.js's imports (see the note
 // there) so a caching server can't serve a stale bots.js against a fresh
 // track.js — the split that left the F1 grid computed but unused.
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=6";
-import * as T from "./track.js?v=6";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=7";
+import * as T from "./track.js?v=7";
 
 // ---------------------------------------------------------------- PRNG
 
@@ -872,7 +872,13 @@ export function makeBot(skill, params) {
 // line is NOT flat out, and name the corner that forces the lift.
 export function recordRace(skill, params, opts = {}) {
   const laps = opts.laps ?? 3;
-  const maxTicks = opts.maxTicks ?? 60 * 120 * laps;   // 2 min budget per lap
+  // Budget: 2 min per lap OR, on a long circuit, a length-derived floor (a
+  // full lap at a pessimistic ~55 px/s with 50% slack). The short circuits are
+  // dominated by the 2-min term, so their behaviour is bit-identical; the cape
+  // cruise, whose single lap can exceed 2 min, gets a budget scaled to it so
+  // the recording never aborts mid-lap and simply returns no bot.
+  const maxTicks = opts.maxTicks ??
+    Math.max(60 * 120 * laps, Math.round(laps * (T.TRACK_LEN / 55) * 60 * 1.5));
   // Start from `opts.start` (an F1 grid slot) if given, else the pole/spawn.
   // A further-back slot just means a longer standing-start run-up to the line;
   // the flying laps that follow are line-to-line and unaffected, so the bot
@@ -1152,6 +1158,17 @@ export function runBot(skillName, skill, params, opts = {}) {
 // rather than about hardware, and their lap times are known up front for the
 // HUD.
 
+// LAPS PER RECORDED RACE, track-aware. The endless-loop playback needs a
+// STANDING lap (to spread the F1 grid on launch) plus at least one FLYING lap
+// (which it then loops forever), so 2 is the floor. The short circuits record 3
+// (lap 1 standing, laps 2-3 flying) as before; a very long circuit like the
+// cape cruise records just 2 — a chill multi-minute cruise does not need the
+// extra flying lap, and dropping it roughly halves the first-visit field sim on
+// the longest track (the real cost driver). Both callers below agree on this so
+// the field cache key never disagrees with what was simulated.
+export const LONG_TRACK_LEN = 8000;   // px; above this, record fewer/longer laps
+export function fieldLaps() { return T.TRACK_LEN > LONG_TRACK_LEN ? 2 : 3; }
+
 export const BOT_TIERS = [
   { key: "novice", skill: "novice", label: "NOVICE", short: "Nov",
     body: "#6fe08b", text: "rgba(111,224,139,0.75)" },
@@ -1188,7 +1205,7 @@ export function fieldSignature(params) {
 // valid laps on this spec are simply absent (the grid shrinks, nothing
 // breaks).
 export function simulateBotField(params, opts = {}) {
-  const laps = opts.laps ?? 3;
+  const laps = opts.laps ?? fieldLaps();
   const t0 = (typeof performance !== "undefined" ? performance : Date).now();
   const field = [];
   // The four bots grid up behind the player: NOVICE on slot 1, MID 2, PRO 3,
@@ -1217,7 +1234,7 @@ export function simulateBotField(params, opts = {}) {
 const FIELD_CACHE_MAX = 8;
 const fieldCache = new Map();
 export function botField(params, opts = {}) {
-  const key = fieldSignature(params) + "|laps=" + (opts.laps ?? 3);
+  const key = fieldSignature(params) + "|laps=" + (opts.laps ?? fieldLaps());
   const hit = fieldCache.get(key);
   if (hit) {
     hit.simMs = 0;              // served from cache

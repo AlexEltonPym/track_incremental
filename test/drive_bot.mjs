@@ -24,12 +24,12 @@ import {
   TICK, G_PX, SURFACE, carParams, legacyParams, createCarState, stepCar, slipAngle,
   ZERO_LEVELS, DRIVING_UPGRADES, UPGRADE_BY_ID, levelsForBudget,
   insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "../physics.js?v=6";
+} from "../physics.js?v=7";
 import {
   SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
   simulateBotField, BOT_TIERS,
-} from "../bots.js?v=6";
-import * as T from "../track.js?v=6";
+} from "../bots.js?v=7";
+import * as T from "../track.js?v=7";
 
 // ---------------------------------------------------------------- scripted feature tests
 
@@ -624,6 +624,17 @@ const TRACK_EXPECT = {
   },
 };
 
+// The three DESIGNED circuits carry the full machinery — the friendliness /
+// ladder / margin gates, the per-track upgrade-space sweep, and the specialist-
+// differentiation gates. The fourth circuit, CAPE CRUISE, is a long, chill
+// cruise with NO dominant upgrade by design, so it is EXEMPT from the
+// differentiation gates (they would assert a specialist it deliberately lacks)
+// and from the heavy per-track sweep (a multi-minute lap would make it crawl);
+// it gets a small, cheap check set of its own (see cruiseChecks). Iterating the
+// designed three explicitly — rather than T.TRACKS — is exactly what keeps
+// adding the cruise from perturbing the existing per-track checks.
+const DESIGNED = ["ember", "longshore", "lantern"];
+
 // ---------------------------------------------------------------- checks
 //
 // The acceptance suite is in three parts:
@@ -1131,6 +1142,121 @@ function trackChecks(results) {
   return { checks, summary };
 }
 
+// ------------------------------------------------ the CAPE CRUISE (exempt)
+//
+// The fourth circuit's SMALL check set. It is a long, deliberately chill cruise
+// with no dominant upgrade, so it is exempt from the differentiation and the
+// heavy upgrade-space sweep. What it still has to prove is:
+//   * it is FRIENDLY: the timid NOVICE laps it and stays out of the grass;
+//   * the tier LADDER holds (proplus < pro < mid < novice, best flying);
+//   * basic MONOTONICITY on a small spec sample (an upgrade never slows a bot);
+//   * it is genuinely LONG (its bot lap far exceeds the designed circuits');
+//   * a full lap RECORDS end-to-end without hitting the recording cap;
+//   * the field simulates within a first-visit budget (kept fast by the 2-lap
+//     field and the absence of any drift plan to race).
+// Deliberately a handful of specs, so the whole suite stays within a few
+// minutes despite a multi-minute lap.
+function cruiseChecks(maxDesignedSecs) {
+  T.setTrack("cruise");
+  const id = T.TRACK_ID;
+  const q = s => `[${id}] ${s}`;
+  const p = carParams(ZERO_LEVELS);
+  const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 1.5;
+
+  // First-visit field (2 laps — see bots.fieldLaps): time it cold.
+  const field = simulateBotField(p);
+  const simMs = field.simMs;
+  const by = Object.fromEntries(field.map(g => [g.key, g]));
+  const nov = by.novice, mid = by.mid, pro = by.pro, pp = by.proplus;
+
+  // Grid: five slots ordered pole->5th, distinct, on-road, and the four bot
+  // recordings actually START at their slots.
+  const slots = [0, 1, 2, 3, 4].map(k => T.gridSlot(k));
+  const behind = slots.map(s => {
+    const i = T.nearestIndex(s.x, s.y);
+    return ((T.TRACK_LEN - T.CUMLEN[i]) % T.TRACK_LEN + T.TRACK_LEN) % T.TRACK_LEN;
+  });
+  let gridOK = field.length === 4;
+  for (let k = 1; k < slots.length; k++) {
+    if (!(behind[k] > behind[k - 1] + 1)) gridOK = false;
+    if (Math.hypot(slots[k].x - slots[k - 1].x, slots[k].y - slots[k - 1].y) < 10) gridOK = false;
+  }
+  for (const s of slots) if (T.surfaceAt(s.x, s.y) !== SURFACE.ROAD) gridOK = false;
+  field.forEach((g, ti) => {
+    const slot = T.gridSlot(ti + 1);
+    if (!near(g.samples[0], [slot.x, slot.y])) gridOK = false;
+  });
+
+  // Friendliness: the NOVICE completes a full 2-lap race and stays off the grass.
+  const novRec = recordRace(SKILLS.novice, p, { laps: 2 });
+  const novOffPct = novRec ? 100 * novRec.offRoadTicks / novRec.totalTicks : 100;
+  const novGrassPct = novRec ? 100 * novRec.grassTicks / novRec.totalTicks : 100;
+
+  // Ladder + a small monotonicity sample.
+  const TIERS = [["novice", "novice"], ["mid", "expert"], ["pro", "pro"],
+    ["proplus", "proplus"]];
+  const lapOf = (sk, lv) => {
+    const r = raceBest(SKILLS[sk], carParams(lv), { laps: 2 });
+    return r ? r.bestFlyingTicks * TICK : null;
+  };
+  // stock, and +6/+7 of each of speed/grip/accel so a +1 step can be checked.
+  const specs = {
+    stock: {}, speed6: { speed: 6 }, speed7: { speed: 7 },
+    grip6: { grip: 6 }, grip7: { grip: 7 }, accel6: { accel: 6 }, accel7: { accel: 7 },
+  };
+  const lap = {};
+  for (const [name, lv] of Object.entries(specs)) {
+    lap[name] = TIERS.map(([, sk]) => lapOf(sk, lv));
+  }
+  const orderOK = row => row.every(v => v !== null) &&
+    row[3] < row[2] && row[2] < row[1] && row[1] < row[0];
+  const ladderStock = orderOK(lap.stock);
+  const orderAll = Object.values(lap).every(orderOK);
+  let monoOK = true;
+  for (const [lo, hi] of [["speed6", "speed7"], ["grip6", "grip7"], ["accel6", "accel7"]]) {
+    for (let i = 0; i < 4; i++) {
+      if (lap[lo][i] === null || lap[hi][i] === null || lap[hi][i] > lap[lo][i] * 1.01) monoOK = false;
+    }
+  }
+
+  // Length + recording cap. The cap mirrors main.js's maxLapTicks().
+  const capTicks = Math.max(60 * 300, Math.round(T.TRACK_LEN / 40 * 60 * 2));
+  const midFly = mid ? mid.bestFlyingTicks : 0;
+  const recordsFully = !!novRec &&
+    novRec.lapTicks.every(t => t < capTicks) && capTicks > midFly;
+
+  console.log(`\n${T.TRACK_NAME} — the fourth circuit (EXEMPT from differentiation):`);
+  console.log(`  ${T.TRACK_LEN.toFixed(0)} px, road ${2 * T.ROAD_HALF} px, ` +
+    `${T.CHECKPOINTS.length} checkpoints, field sim ${simMs.toFixed(0)} ms (2-lap field), ` +
+    `recording cap ${capTicks} ticks (${(capTicks / 60).toFixed(0)}s)`);
+  console.log("  " + pad("tier", 9) + pad("lap 1 (standing)", 18) + pad("lap 2 (flying)", 16) +
+    pad("boosts", 8));
+  for (const g of field) {
+    console.log("  " + pad(g.short, 9) + pad((g.lapTicks[0] * TICK).toFixed(1) + "s", 18) +
+      pad((g.bestFlyingTicks * TICK).toFixed(1) + "s", 16) + pad(g.boostFires, 8));
+  }
+  console.log(`  novice: ${novRec ? "valid 2-lap race" : "FAILED"}, ` +
+    `off-road ${novOffPct.toFixed(2)}% (grass ${novGrassPct.toFixed(2)}%); ` +
+    `mid flying lap ${(midFly * TICK).toFixed(1)}s vs designed max ${maxDesignedSecs.toFixed(1)}s`);
+
+  return [
+    [q("the four reference bots all complete the 2-lap field"), field.length === 4],
+    [q("grid slots ordered/distinct/on-road AND bot recordings start at them"), gridOK],
+    [q("novice cruises it: a full valid 2-lap race"), !!novRec],
+    [q("novice stays out of the grass (0%) and mostly on the road (< 3% off)"),
+      novGrassPct === 0 && novOffPct < 3],
+    [q("tier ladder holds on best flying lap (proplus < pro < mid < novice)"), ladderStock],
+    [q("ladder holds across the small upgrade sample too"), orderAll],
+    [q("monotonic on the small sample: +1 level never makes a bot slower"), monoOK],
+    [q("no drift plan here (a chill cruise has no chargeable corner)"),
+      deriveDriftZones(p, SKILLS.proplus).zones.length === 0],
+    [q(`the lap is genuinely long (>= 90s AND >= 5x the designed circuits' ${maxDesignedSecs.toFixed(0)}s)`),
+      midFly * TICK >= 90 && midFly * TICK >= 5 * maxDesignedSecs],
+    [q("a full lap records end-to-end without hitting the recording cap"), recordsFully],
+    [q("first-visit field sim stays within budget (< 1500 ms)"), simMs < 1500],
+  ];
+}
+
 // ---------------------------------------------------------------- modes
 
 function runSuite(paramsFor, label) {
@@ -1184,10 +1310,10 @@ function main() {
   const checks = physicsChecks();
   // Endless-model plumbing: grid slots (per track) + ranked-lap / fleet-gate
   // logic (track-independent). Excluded from the driving sweep on purpose.
-  checks.push(...gridChecks(T.TRACKS.map(t => t.id)));
+  checks.push(...gridChecks(DESIGNED));
   checks.push(...economyLogicChecks());
   const summaries = [];
-  for (const meta of T.TRACKS) {
+  for (const meta of T.TRACKS.filter(t => DESIGNED.includes(t.id))) {
     T.setTrack(meta.id);
     const results = runSuite(() => carParams(ZERO_LEVELS),
       `${meta.name} — ${meta.skillLabel} — CURRENT physics ` +
@@ -1217,7 +1343,7 @@ function main() {
   // Full grid on the drift circuit (the only one where the corner analyser
   // plans zones, so the one with the most ways to break); a reduced grid on
   // the other two, which still covers every upgrade alone plus the extremes.
-  for (const meta of T.TRACKS) {
+  for (const meta of T.TRACKS.filter(t => DESIGNED.includes(t.id))) {
     T.setTrack(meta.id);
     const full = meta.skill === "boost";
     const sweep = upgradeSweep(full ? "full" : "reduced");
@@ -1240,7 +1366,10 @@ function main() {
   }
 
   // ---- the three circuits reward three different upgrades ----
-  const ids = T.TRACKS.map(t => t.id);
+  // DESIGNED only: Cape Cruise is exempt from the differentiation gates (it has
+  // no dominant upgrade by design), so the sensitivity / value-per-credit tables
+  // and their gates iterate the three designed circuits, never the cruise.
+  const ids = DESIGNED;
   const S = sensitivity(ids);
   const gain = (id, u) => S[id].gain[u];
   const boost = id => gain(id, "boostPwr") + gain(id, "boostDur");
@@ -1297,6 +1426,10 @@ function main() {
       vpc(boostT, "speed", 3000) >= 5 &&
       ["accel", "grip"].every(u => vpc(boostT, "speed", 3000) > vpc(boostT, u, 3000))],
   );
+
+  // ---- the fourth circuit: CAPE CRUISE, its own small (exempt) check set ----
+  const maxDesignedSecs = Math.max(...summaries.map(s => s.pro ?? 0));
+  checks.push(...cruiseChecks(maxDesignedSecs));
 
   console.log("\nAcceptance criteria:");
   let allPass = true;
