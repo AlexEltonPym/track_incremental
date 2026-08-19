@@ -206,38 +206,41 @@ function build(track) {
     return false;
   };
 
-  // ---- the dense forest band. At each step along the centerline, SCATTER a
-  // handful of trees at RANDOM offsets across the band and RANDOM positions
-  // along the step, on a random side — NOT a regular grid of rows and columns,
-  // which reads as an orchard. Every candidate is validated against the true
+  // ---- the dense forest band. Each tree gets its OWN random arc position and
+  // random depth into the band, so it is a genuine 2D scatter — NOT a grid of
+  // rows/columns, and not a set of shared perpendicular streaks (both of which
+  // read as an orchard). Every candidate is validated against the true
   // distToTrack, so the band stays a constant-width corridor even where the
   // track loops back near itself and nothing lands in the grass gap. `cell` sets
   // the density (biggest track near TARGET_CAND, floored so small tracks stay
-  // densely wooded); `perStep` trees per step keeps it dense on both sides.
+  // densely wooded); `target` is the resulting tree count, hard-capped.
   const cell = Math.max(MIN_SP / fl.forest,
     Math.sqrt(2 * FOREST_W * TRACK_LEN / TARGET_CAND));
-  const perStep = Math.max(2, Math.round(2 * FOREST_W / cell));
+  const target = Math.min(TREE_CAP,
+    Math.round(2 * FOREST_W * TRACK_LEN / (cell * cell)));
   const trees = [];
-  outerWalk:
-  for (let arc = 0; arc < TRACK_LEN; arc += cell) {
+  let tries = 0;
+  const tryCap = target * 6;
+  while (trees.length < target && tries < tryCap) {
+    tries++;
+    // A fresh random arc PER TREE (not a stepped walk): the tangent/normal are
+    // taken where THIS tree sits, so no two trees share a perpendicular line —
+    // that shared-normal grid was the orchard-row artifact. Random arc + random
+    // depth = genuine 2D scatter across the band.
+    const arc = rng() * TRACK_LEN;
     const i = track.indexAtArc(arc);
     const p = CENTER[i], q = CENTER[(i + 1) % N];
     let tx = q[0] - p[0], ty = q[1] - p[1];
     const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
-    const nx = -ty, ny = tx;
-    for (let j = 0; j < perStep; j++) {
-      const side = rng() < 0.5 ? 1 : -1;
-      const o = inner + rng() * FOREST_W;        // random offset across the band
-      const along = rng() * cell;                // random position along the step
-      const x = p[0] + tx * along + nx * side * o;
-      const y = p[1] + ty * along + ny * side * o;
-      const d = dist(x, y);
-      if (d < inner || d > outer) continue;
-      if (inLake(x, y, 6) || inClearing(x, y)) continue;
-      const r = Math.max(9, cell * 0.42 + rng() * cell * 0.42);
-      trees.push([x, y, r, Math.floor(rng() * PALETTE.trees.length)]);
-      if (trees.length >= TREE_CAP) break outerWalk;
-    }
+    const side = rng() < 0.5 ? 1 : -1;
+    const o = inner + rng() * FOREST_W;          // random depth into the band
+    const x = p[0] - ty * side * o;              // out along the normal (-ty, tx)
+    const y = p[1] + tx * side * o;
+    const d = dist(x, y);
+    if (d < inner || d > outer) continue;
+    if (inLake(x, y, 6) || inClearing(x, y)) continue;
+    const r = Math.max(9, cell * 0.42 + rng() * cell * 0.42);
+    trees.push([x, y, r, Math.floor(rng() * PALETTE.trees.length)]);
   }
 
   // ---- rocks / bushes / flowers: in the GRASS CORRIDOR and the clearings,
@@ -293,7 +296,7 @@ function build(track) {
     sig: TRACK_SIGNATURE,
     meta: {
       gap: GAP, forestWidth: FOREST_W,
-      inner, outer, spacing: +cell.toFixed(1), perStep,
+      inner, outer, spacing: +cell.toFixed(1), target,
     },
     lakes, clearings, trees, rocks, bushes, flowers,
     counts: {
