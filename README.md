@@ -12,7 +12,7 @@ LANTERN COIL rewards grip. That is measured, not asserted — see
 *[The three circuits](#the-three-circuits)*.
 
 …plus a **fourth, in a different class entirely: CAPE CRUISE** — a much longer,
-windier, more relaxed scenic loop (a ~2.8-minute bot lap against the others'
+windier, more relaxed scenic loop (a ~1.7-minute bot lap against the others'
 ~10–13 s), unlocked from the start, deliberately with *no* dominant upgrade. It
 is a place to drive, not a circuit to master. See *[Cape Cruise, the fourth
 circuit](#cape-cruise-the-fourth-circuit)*.
@@ -431,29 +431,42 @@ tier-1 charge requirement across the whole upgrade range.
 
 The other three are ~2.2–3.5 k px with 10–13 s bot laps, each a tight little
 skill-expression track. **CAPE CRUISE is the opposite of all of that**: a
-**46,506 px** scenic coastal loop with a **~2.8-minute** bot lap (167 s for PRO,
-173 s for NOVICE), a **wide 104 px road**, long flowing straights and eight big
-gentle sweepers — every radius ≥ 260 px, nothing tight or technical, generous
-runoff. It exists to be *cruised*: the timid NOVICE bot laps it with **0.00 %**
-of its time off-road, and there is **no dominant upgrade to express** — most of
-the lap is spent flat-out on straights, so the specialist levers barely move.
-It is unlocked from the start.
+**27,607 px** scenic coastal loop with a **~1.7-minute** bot lap (99 s for PRO,
+102 s for NOVICE), a **wide 104 px road**, occasional straights and twenty big
+gentle sweepers — every radius ≥ 660 px, nothing tight or technical. It exists
+to be *cruised*: the timid NOVICE bot laps it with **0.00 %** of its time
+off-road, and there is **no dominant upgrade to express** — the corners are all
+far too open to reward a specialist lever. It is unlocked from the start.
 
-**How it is shaped.** A closed loop has to return to its start in both position
-*and* heading, which is fiddly to hand-solve for a long meandering path. So the
-circuit is defined as **one windy half that nets exactly −180° of turning, then
-duplicated**: running that same relative sequence again from a pose already
-rotated 180° traces the point-symmetric second half and lands back on the start
-pose *exactly* (two 180° rotations compose to the identity), for **any** such
-half. That is what let the corners be placed freely — the only rule the half
-obeys is "arc degrees sum to −180" (`CRUISE` in `track.js`). It reuses every
-piece of the derived machinery for free: centerline, gates, sectors, F1 grid
-slots, and the geometry-derived concrete runoff (~13 % of the lap, on the
-outsides of the tighter sweepers).
+**How it is shaped — an organic solved-closure loop, not a mirror.** The old
+cruise was one windy half *duplicated under a 180° rotation*, so the whole track
+was point-symmetric — and that perfect rotational symmetry is exactly what read
+as artificial. This one is a single, **asymmetric, meandering coastal outline**
+with no repeating or mirror structure. An asymmetric meander does not return to
+its own start, so the closure is **solved**, not tricked:
 
-### Why a 50×-longer track needed engineering, not just geometry
+- **Heading** closes because every arc's degrees sum to exactly **−360°** (one
+  full loop) — the last arc's angle is set to whatever makes the total −360.
+- **Position** closes through the **straights**: seven straights sit around the
+  loop, and the endpoint offset that remains once the arcs are laid down is
+  distributed across them by a **least-norm solve** (`extras = Dᵀ(DDᵀ)⁻¹(−residual)`,
+  `D` the matrix of the straights' unit headings), so the closing translation is
+  shared out and every straight keeps a sane positive length.
 
-A multi-minute lap breaks assumptions that were safe on a 12-second one:
+The seg list in `track.js` is the solved result of a seeded search (thousands of
+candidates), picked for a chill profile — a mostly-convex coastal outline with
+gentle counter-curve bays, **min radius 660 px, arc ~84 %, ~27.6 k px / ~1.7 min
+lap** — that **never comes within ~2.4 road-widths of itself** (the road never
+crosses or near-touches; genuinely distant sections stay > 1 000 px apart). It
+reuses every piece of the derived machinery for free: centerline, gates,
+sectors, F1 grid slots and the runoff. (Because every radius clears the corner
+threshold — 8 road half-widths ≈ 416 px — the geometry-derived analysers find
+**no corner at all** here, so there is no drift zone to plan and no concrete
+runoff: a wide, open, uniformly gentle road, exactly as a chill cruise wants.)
+
+### Why a 12×-longer track needed engineering, not just geometry
+
+A ~100-second lap breaks assumptions that were safe on a 12-second one:
 
 - **Recording caps.** `main.js`'s lap-recording abort (`maxLapTicks()`) and
   `bots.js`'s `recordRace` budget were fixed 5-minute / 2-minute-per-lap
@@ -462,14 +475,14 @@ A multi-minute lap breaks assumptions that were safe on a 12-second one:
   lap *and* the bot recordings. The short circuits are dominated by the old
   floors, so their behaviour is unchanged.
 - **First-visit field sim.** `simulateBotField` runs four bots' whole race on
-  the first visit (then caches). On a 2.8-min lap a 3-lap field would be a
+  the first visit (then caches). On a ~1.7-min lap a 3-lap field would be a
   multi-second freeze, so a long track records **2 laps, not 3** (a standing
   launch + one flying lap to loop — a chill cruise does not need the extra
-  flying lap; `bots.fieldLaps()`). Measured **~560 ms in Node, ~710 ms in the
+  flying lap; `bots.fieldLaps()`). Measured **~275 ms in Node, ~350 ms in the
   browser** — well under a ~2 s budget. There is also **no drift plan to race**
-  here (every corner is too gentle/short to bank a charge at any spec), which
+  here (every radius is too open to bank a charge at any spec), which
   keeps PRO+ to a single simulated variant.
-- **Broad-phase grid build.** The circuit's bounding box is ~14 k × 14 k px; a
+- **Broad-phase grid build.** The circuit's bounding box is ~9.3 k × 8.4 k px; a
   fixed 32 px collision-grid cell would build millions of cells. The cell size
   is now **adaptive** (`GRID_TARGET_CELLS`), sized to keep the cell *count*
   bounded, which cut the build from ~770 ms to ~200 ms. Cell size never changes
@@ -490,9 +503,10 @@ a length check, a full-lap-records check, and a field-sim-budget check) so the
 whole suite stays fast despite a multi-minute lap.
 
 **The economy caveat, stated plainly:** payout is `round(720 / lapSeconds) ×
-mult`, which for a ~167 s lap **rounds to ~1 credit per loop**. Cape Cruise is
-therefore **not an income source** — it is a test/cruise level, a place to
-drive. That is expected and intentional.
+mult`, which for a ~100 s lap **rounds to only a handful of credits per loop**
+(against ~85 for an Ember loop). Cape Cruise is therefore **not an income
+source** — it is a test/cruise level, a place to drive. That is expected and
+intentional.
 
 ## The bot ghosts (an endless pace field, simulated live)
 
@@ -972,9 +986,9 @@ drives.
   — the boost track), **LONGSHORE SPEEDWAY** (3 473 px, long straights and four
   flat-out double-apex corners — the top-speed track), **LANTERN COIL**
   (2 222 px, seven linked medium-speed corners with no straights — the grip
-  track), and **CAPE CRUISE** (46 506 px, a ~2.8-minute scenic coastal loop of
-  long straights and big gentle sweepers — a chill cruise with *no* dominant
-  upgrade, exempt from the differentiation gates; see
+  track), and **CAPE CRUISE** (27 607 px, a ~1.7-minute organic scenic coastal
+  loop of gentle sweepers and occasional straights — a chill cruise with *no*
+  dominant upgrade, exempt from the differentiation gates; see
   *[Cape Cruise](#cape-cruise-the-fourth-circuit)*). **Ember and Cape Cruise are
   unlocked from the start; Longshore (4,000 cr) and Lantern (15,000 cr) are
   one-off credit unlocks** shown with a 🔒 and their price in the selector. The

@@ -56,79 +56,89 @@ const DEG = Math.PI / 180;
 //
 // THE FOURTH CIRCUIT — deliberately in a different class from the other three:
 // much LONGER, much WINDIER and far more RELAXED. A scenic coastal cruise, not
-// a technical circuit: a wide road, long flowing straights and big gentle
-// sweepers (every radius >= 380 px, nothing tight or technical), so the timid
+// a technical circuit: a wide road, occasional straights and big gentle
+// sweepers (every radius >= 660 px, nothing tight or technical), so the timid
 // NOVICE bot laps it comfortably and there is no dominant upgrade to express —
 // it is a place to drive, not an income source (see README). Because a lap is
 // several times longer than the others, it is EXEMPT from the specialist-
 // differentiation gates and gets only a small, cheap check set in the harness,
 // and the bot field records FEWER, longer laps (see bots.js fieldLaps()).
 //
-// HOW IT CLOSES. A closed track has to return to its start in BOTH position and
-// heading, which is fiddly to hand-solve for a long meandering path. So the
-// circuit is built from ONE windy half that nets exactly -180 degrees of
-// turning, then DUPLICATED: running the same relative sequence again from a
-// pose already rotated 180 degrees traces the point-symmetric second half and
-// lands back on the start pose EXACTLY (two 180-degrees rotations compose to the
-// identity), for ANY such half. That lets the corners be placed freely — the
-// only rule the half must obey is "arc degrees sum to -180".
-const CRUISE = (() => {
-  // The windy first half — now almost ALL sweeping arc (~91%), no long
-  // straights to just hold W down: one gentle bend hands off to the next,
-  // alternating direction, so you are always turning. Arc degrees:
-  // -88+84-90+82-86+80-92+78-88+82-84+76-70-64 = -180 (the half MUST net
-  // exactly -180 for the point-symmetric duplication to close the loop).
-  // Every radius is large (560-740 px — grander and gentler than before, so
-  // nothing needs braking) and every corner far too long-radiused to ever bank
-  // a drift charge at any spec, so PRO+ plans no drift and there is no dominant
-  // upgrade — the point of a chill cruise. The alternating sweepers carry the
-  // length (~2 min lap) instead of straights. Four 300 px links are the only
-  // breathers.
-  const half = [
-    ["a", 620, -88, "Sea Point sweep"],
-    ["a", 660, 84, "the inlet"],
-    ["a", 580, -90, "Gull curve"],
-    ["s", 300],
-    ["a", 700, 82, "the dune bend"],
-    ["a", 600, -86, "Smugglers sweep"],
-    ["a", 720, 80, "the marsh arc"],
-    ["a", 560, -92, "the cove"],
-    ["s", 300],
-    ["a", 740, 78, "the lagoon bend"],
-    ["a", 600, -88, "the bluffs"],
-    ["a", 680, 82, "the reach"],
-    ["s", 300],
-    ["a", 620, -84, "the cliffs"],
-    ["a", 700, 76, "the headland"],
-    ["a", 650, -70, "the outer point"],
-    ["s", 300],
-    ["a", 600, -64, "the marina curve"],
-  ];
-  // Point-symmetric return half: the same shape, names suffixed so each sector
-  // stays distinct in the telemetry.
-  const back = half.map(s => s[0] === "s"
-    ? (s[2] ? ["s", s[1], s[2] + " (return)"] : ["s", s[1]])
-    : ["a", s[1], s[2], s[3] + " (return)"]);
-  return {
-    id: "cruise",
-    name: "CAPE CRUISE",
-    short: "Cruise",
-    skill: "cruise",
-    skillLabel: "Scenic cruise",
-    // Wide and forgiving — the widest road on any circuit.
-    roadHalf: 52,
-    start: [1200, 4200], heading: 0,
-    // Coarser sampling than the others (the large radii need no dense control
-    // points), which keeps the centerline point count — and with it the
-    // broad-phase grid build and the per-tick nearest-point search — modest
-    // despite the length.
-    spacing: 60, samples: 4,
-    // Six gates spread around the loop, each on a sweeper apex (half segs 0-17,
-    // return 18-35; these indices are all arcs).
-    checkpoints: [[1, 0.5], [6, 0.5], [11, 0.5], [19, 0.5], [24, 0.5], [29, 0.5]],
-    segs: [...half, ...back],
-  };
-})();
+// HOW IT CLOSES — an ORGANIC solved-closure loop, not a mirror.
+//
+// The old cruise was one windy half duplicated under a 180-degrees rotation, so
+// the whole track was point-symmetric — and that perfect rotational symmetry is
+// exactly what read as artificial. This one is a single, ASYMMETRIC, meandering
+// coastal loop with no repeating or mirror structure. An asymmetric meander does
+// not return to its own start, so the closure is SOLVED rather than tricked:
+//
+//   * HEADING closes because every arc's degrees sum to exactly -360 (one full
+//     loop) — the last arc's angle is set to whatever makes the total -360.
+//   * POSITION closes through the STRAIGHTS. Seven straights sit around the loop;
+//     the endpoint offset that remains once the arcs are laid down is distributed
+//     across them by a least-norm solve (extras = D^T (D D^T)^-1 (-residual),
+//     D the matrix of the straights' unit headings), so the closing translation
+//     is shared out and every straight keeps a sane positive length.
+//
+// The seg list below is the solved result of that search (scratch generator,
+// seed 26216): a mostly-convex coastal outline — heading trending once around
+// with gentle counter-curves for bays — chosen from thousands of candidates for
+// a chill profile (min radius 660 px, arc ~84%, ~27.6 k px / ~2.8 min lap) that
+// never comes within ~2.4 road-widths of itself (min self-distance ~230 px, so
+// the road never crosses or near-touches). Every radius is far too large to bank
+// a drift charge at any spec, so PRO+ plans no drift and no upgrade dominates —
+// the point of a chill cruise. It reuses every piece of the derived machinery
+// for free: centerline, gates, sectors, F1 grid slots and the runoff.
+const CRUISE = {
+  id: "cruise",
+  name: "CAPE CRUISE",
+  short: "Cruise",
+  skill: "cruise",
+  skillLabel: "Scenic cruise",
+  // Wide and forgiving — the widest road on any circuit.
+  roadHalf: 52,
+  start: [1200, 4200], heading: 0,
+  // Coarser sampling than the others (the large radii need no dense control
+  // points), which keeps the centerline point count — and with it the
+  // broad-phase grid build and the per-tick nearest-point search — modest
+  // despite the length.
+  spacing: 60, samples: 4,
+  // Six gates spread around the loop, each on a sweeper apex (these flat-list
+  // indices are all arcs, roughly evenly spaced around the lap).
+  checkpoints: [[1, 0.5], [5, 0.5], [9, 0.5], [13, 0.5], [17, 0.5], [21, 0.5]],
+  // The solved organic loop: 20 sweeping arcs (radius 660-5950, degrees summing
+  // to exactly -360) and 7 straights (296-874 px) whose lengths the least-norm
+  // solve set to close the loop's position. Scenic coastal sector names.
+  segs: [
+    ["a", 1360, -21, "Sea Point sweep"],
+    ["a", 780, -24, "Gull curve"],
+    ["s", 609, "the causeway"],
+    ["a", 1020, 36, "the inlet"],
+    ["a", 5950, -44, "the long reach"],
+    ["a", 910, 33, "Smugglers bend"],
+    ["s", 764, "the promenade"],
+    ["a", 660, -20, "the cove"],
+    ["a", 1570, -41, "the dune sweep"],
+    ["a", 4230, -16, "the marsh arc"],
+    ["a", 3280, -22, "the lagoon bend"],
+    ["s", 296],
+    ["a", 930, -29, "the bluffs"],
+    ["a", 1380, -38, "the cliff sweep"],
+    ["s", 457],
+    ["a", 1580, 36, "the estuary"],
+    ["a", 1000, -33, "Heron curve"],
+    ["a", 1850, -26, "the sands"],
+    ["a", 670, -18, "Pelican bend"],
+    ["s", 703, "the boardwalk"],
+    ["a", 3970, -40, "the headland"],
+    ["a", 2470, 35, "Tern sweep"],
+    ["s", 734],
+    ["a", 970, 27, "the anchorage"],
+    ["a", 4050, -29, "Lighthouse reach"],
+    ["a", 920, -126, "the marina curve"],
+    ["s", 874, "the harbour front"],
+  ],
+};
 
 export const TRACK_DEFS = [
   {
