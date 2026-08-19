@@ -175,6 +175,30 @@ function build(track) {
     return false;
   };
 
+  // Soft clearing edge for the forest: instead of a hard in/out cut, thin the
+  // trees through a transition band — certainly removed deep inside a clearing,
+  // increasingly likely to survive toward its edge and a touch beyond it — so
+  // the canopy FADES into the open grass rather than stopping at a circle.
+  // Returns the probability [0,1] that a tree here should be removed.
+  const clearingRemoveProb = (x, y) => {
+    let best = 0;
+    for (const c of clearings) {
+      const dx = x - c.cx, dy = y - c.cy;
+      const dd = dx * dx + dy * dy;
+      if (dd > c.r * c.r * 1.6) continue;
+      const ang = Math.atan2(dy, dx);
+      const rr = c.r * (1 + c.a1 * Math.sin(ang + c.ph1) + c.a2 * Math.sin(2 * ang + c.ph2));
+      const d = Math.sqrt(dd);
+      const core = rr * 0.5, edge = rr * 1.08;   // fully clear -> full forest
+      let p;
+      if (d <= core) p = 1;
+      else if (d >= edge) p = 0;
+      else { const t = (edge - d) / (edge - core); p = t * t * (3 - 2 * t); }  // smoothstep
+      if (p > best) best = p;
+    }
+    return best;
+  };
+
   // ---- lakes: sited inside the forest band, well clear of the road and apart.
   const lakes = [];
   const maxLakeR = Math.max(55, Math.min(150, FOREST_W * 0.32));
@@ -238,8 +262,11 @@ function build(track) {
     const y = p[1] + tx * side * o;
     const d = dist(x, y);
     if (d < inner || d > outer) continue;
-    if (inLake(x, y, 6) || inClearing(x, y)) continue;
-    const r = Math.max(9, cell * 0.42 + rng() * cell * 0.42);
+    if (inLake(x, y, 6)) continue;
+    const cp = clearingRemoveProb(x, y);          // fade the forest into clearings
+    if (cp > 0 && rng() < cp) continue;
+    // survivors near a clearing edge are smaller, softening the transition
+    const r = Math.max(8, (cell * 0.42 + rng() * cell * 0.42) * (1 - 0.45 * cp));
     trees.push([x, y, r, Math.floor(rng() * PALETTE.trees.length)]);
   }
 

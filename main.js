@@ -21,7 +21,7 @@ import {
 import { botField } from "./bots.js?v=9";
 // Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
 // per track from geometry + a seeded PRNG and cached. Rendered under the road.
-import { getDecor, PALETTE } from "./decor.js?v=6";
+import { getDecor, PALETTE } from "./decor.js?v=7";
 
 // ---------------------------------------------------------------- constants
 
