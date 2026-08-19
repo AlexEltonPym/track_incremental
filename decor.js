@@ -206,38 +206,37 @@ function build(track) {
     return false;
   };
 
-  // ---- the dense forest band. Trees on a jittered grid that FOLLOWS the track:
-  // walk the centerline, and at each step lay a column of trees out along the
-  // normal on BOTH sides, from the corridor edge to the band's outer edge. Every
-  // candidate is validated against the true distToTrack, so the band stays a
-  // constant-width corridor even where the track loops back near itself, and
-  // nothing lands in the grass gap. Spacing is chosen so the biggest track lands
-  // near TARGET_CAND candidates; the floor keeps small tracks densely wooded.
-  const sp = Math.max(MIN_SP / fl.forest,
+  // ---- the dense forest band. At each step along the centerline, SCATTER a
+  // handful of trees at RANDOM offsets across the band and RANDOM positions
+  // along the step, on a random side — NOT a regular grid of rows and columns,
+  // which reads as an orchard. Every candidate is validated against the true
+  // distToTrack, so the band stays a constant-width corridor even where the
+  // track loops back near itself and nothing lands in the grass gap. `cell` sets
+  // the density (biggest track near TARGET_CAND, floored so small tracks stay
+  // densely wooded); `perStep` trees per step keeps it dense on both sides.
+  const cell = Math.max(MIN_SP / fl.forest,
     Math.sqrt(2 * FOREST_W * TRACK_LEN / TARGET_CAND));
-  const nRows = Math.max(1, Math.round(FOREST_W / sp));
-  const rowStep = FOREST_W / nRows;
+  const perStep = Math.max(2, Math.round(2 * FOREST_W / cell));
   const trees = [];
   outerWalk:
-  for (let arc = 0; arc < TRACK_LEN; arc += sp) {
+  for (let arc = 0; arc < TRACK_LEN; arc += cell) {
     const i = track.indexAtArc(arc);
     const p = CENTER[i], q = CENTER[(i + 1) % N];
     let tx = q[0] - p[0], ty = q[1] - p[1];
     const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
     const nx = -ty, ny = tx;
-    for (let side = -1; side <= 1; side += 2) {
-      for (let row = 0; row < nRows; row++) {
-        const o = inner + (row + 0.5) * rowStep + (rng() - 0.5) * rowStep * 0.7;
-        const jt = (rng() - 0.5) * sp * 0.7;
-        const x = p[0] + tx * jt + nx * side * o;
-        const y = p[1] + ty * jt + ny * side * o;
-        const d = dist(x, y);
-        if (d < inner || d > outer) continue;
-        if (inLake(x, y, 6) || inClearing(x, y)) continue;
-        const r = rowStep * 0.5 + rng() * rowStep * 0.35;
-        trees.push([x, y, Math.max(8, r), Math.floor(rng() * PALETTE.trees.length)]);
-        if (trees.length >= TREE_CAP) break outerWalk;
-      }
+    for (let j = 0; j < perStep; j++) {
+      const side = rng() < 0.5 ? 1 : -1;
+      const o = inner + rng() * FOREST_W;        // random offset across the band
+      const along = rng() * cell;                // random position along the step
+      const x = p[0] + tx * along + nx * side * o;
+      const y = p[1] + ty * along + ny * side * o;
+      const d = dist(x, y);
+      if (d < inner || d > outer) continue;
+      if (inLake(x, y, 6) || inClearing(x, y)) continue;
+      const r = Math.max(9, cell * 0.42 + rng() * cell * 0.42);
+      trees.push([x, y, r, Math.floor(rng() * PALETTE.trees.length)]);
+      if (trees.length >= TREE_CAP) break outerWalk;
     }
   }
 
@@ -294,7 +293,7 @@ function build(track) {
     sig: TRACK_SIGNATURE,
     meta: {
       gap: GAP, forestWidth: FOREST_W,
-      inner, outer, spacing: +sp.toFixed(1), rows: nRows,
+      inner, outer, spacing: +cell.toFixed(1), perStep,
     },
     lakes, clearings, trees, rocks, bushes, flowers,
     counts: {
