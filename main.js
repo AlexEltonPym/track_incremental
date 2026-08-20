@@ -182,6 +182,12 @@ const state = {
 
 let params = carParams(state.drivingLevels);
 
+// Render-interpolation state: the previous physics-tick pose (pc*), the blended
+// pose used for drawing this frame (pi*), and how far between ticks we are.
+let interpAlpha = 0;
+let pcx = START_POS.x, pcy = START_POS.y, pca = START_ANGLE;
+let pix = START_POS.x, piy = START_POS.y, pia = START_ANGLE;
+
 const camera = {
   x: START_POS.x, y: START_POS.y, angle: START_ANGLE,
   zoom: CAM_ZOOM_SLOW,
@@ -568,6 +574,11 @@ canvas.addEventListener("wheel", e => {
 
 function physicsStep() {
   const c = state.car;
+  // Snapshot the pose at the START of this tick so render() can interpolate
+  // between it and the post-step pose. Without this, the car (and every
+  // tick-driven visual) is drawn at the latest discrete tick while frames land
+  // between ticks — that mismatch is the jitter.
+  pcx = c.x; pcy = c.y; pca = c.angle;
 
   // ---- EARNING GHOSTS + INCOME, always, on EVERY unlocked track ----
   // Independent of the race: the fleets loop and pay whatever phase we are in.
@@ -749,8 +760,8 @@ function updateCamera(dt) {
   const latX = -Math.sin(camera.angle) * lat, latY = Math.cos(camera.angle) * lat;
 
   const a = 1 - Math.exp(-CAM_SMOOTH * dt);
-  camera.x += (c.x + lx + latX - camera.x) * a;
-  camera.y += (c.y + ly + latY - camera.y) * a;
+  camera.x += (pix + lx + latX - camera.x) * a;   // follow the interpolated pose
+  camera.y += (piy + ly + latY - camera.y) * a;
 
   // Rotation target: direction of travel when moving forward (so the car,
   // not the world, swings during a drift), the car's heading at low speed.
@@ -847,6 +858,15 @@ function sampleSpeed(samples, i) {
   const n = samples.length;
   const a = samples[i], b = samples[(i - 1 + n) % n];
   return Math.hypot(a[0] - b[0], a[1] - b[1]) / TICK;
+}
+
+// A replayed car's render pose, interpolated between the previous and current
+// sample by interpAlpha — so ghosts and bots are as smooth as the player car.
+function interpSample(samples, i) {
+  const n = samples.length;
+  const b = samples[(i - 1 + n) % n], a = samples[i];
+  return [b[0] + (a[0] - b[0]) * interpAlpha, b[1] + (a[1] - b[1]) * interpAlpha,
+    b[2] + angDiff(a[2], b[2]) * interpAlpha];
 }
 
 // A small boost flame behind a GHOST, inferred from motion: a car moving faster
@@ -1069,7 +1089,7 @@ function renderWorld() {
   // small floating label counter-rotated to stay upright under the camera.
   if (state.showBotGhosts) {
     for (const g of botGhosts) {
-      const s = g.samples[g.idx];
+      const s = interpSample(g.samples, g.idx);
       ghostFlame(s[0], s[1], s[2], sampleSpeed(g.samples, g.idx), 0.5);
       drawCar(s[0], s[1], s[2], 0.24, g.body);
       ctx.save();
@@ -1092,7 +1112,7 @@ function renderWorld() {
     for (let k = n - 1; k >= 0; k--) {
       const rec = ts.rankedLaps[k];
       const h = Math.min(ts.ghostHeads[k] ?? 0, rec.samples.length - 1);
-      const g = rec.samples[h];
+      const g = interpSample(rec.samples, h);
       ghostFlame(g[0], g[1], g[2], sampleSpeed(rec.samples, h), k === 0 ? 0.55 : 0.45);
       drawCar(g[0], g[1], g[2], k === 0 ? 0.38 : 0.26, k === 0 ? "#cfe8ff" : "#9fd0f5");
     }
@@ -1102,8 +1122,8 @@ function renderWorld() {
   const car = state.car;
   if (car.boostTime > 0) {
     ctx.save();
-    ctx.translate(car.x, car.y);
-    ctx.rotate(car.angle);
+    ctx.translate(pix, piy);
+    ctx.rotate(pia);
     const flick = 1 + 0.35 * Math.sin(state.totalTicks * 1.1);
     const len = (car.boostAmt > 0.3 ? 16 : 11) * flick;
     ctx.globalAlpha = 0.85;
@@ -1119,7 +1139,7 @@ function renderWorld() {
   // Player car.
   // Player car, tinted by surface: red on tarmac, a shade duller on concrete,
   // properly washed out in the grass.
-  drawCar(state.car.x, state.car.y, state.car.angle, 1,
+  drawCar(pix, piy, pia, 1,
     state.surface === SURFACE.GRASS ? "#c95f3f"
       : state.surface === SURFACE.RUNOFF ? "#dc5b46" : "#e84d3d");
 }
@@ -1275,8 +1295,11 @@ function render() {
 
   // ---- countdown: 3 / 2 / 1 (each ~1 s), then a GO! flash ----
   if (state.phase === "countdown") {
-    const num = Math.ceil(state.countdown / 60);      // 3, 2, 1
-    const frac = (state.countdown % 60) / 60;         // 1 -> 0 within each second
+    // Continuous (sub-tick) countdown so the grow/fade animation is smooth
+    // between physics ticks instead of stepping (the same jitter fix as the car).
+    const cont = state.countdown - interpAlpha;
+    const num = Math.max(1, Math.ceil(cont / 60));    // 3, 2, 1
+    const frac = ((cont % 60) + 60) % 60 / 60;        // 1 -> 0 within each second
     ctx.save();
     ctx.globalAlpha = 0.35 + 0.65 * frac;
     ctx.fillStyle = "#ffc857";
@@ -1288,7 +1311,7 @@ function render() {
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
   } else if (state.goFlash > 0) {
-    const t = state.goFlash / GO_FLASH_TICKS;         // 1 -> 0
+    const t = Math.max(0, (state.goFlash - interpAlpha)) / GO_FLASH_TICKS;  // 1 -> 0
     ctx.save();
     ctx.globalAlpha = Math.min(1, t * 2);
     ctx.fillStyle = "#6fe08b";
@@ -1516,6 +1539,15 @@ function frame(now) {
     physicsStep();
     acc -= TICK;
   }
+  // Render-interpolation fraction: how far this frame sits between the last two
+  // physics ticks. The car (and camera follow) render at the blended pose, so
+  // motion is smooth even though physics is a fixed 60 Hz step and frames don't
+  // line up with ticks.
+  interpAlpha = acc / TICK;
+  const c = state.car;
+  pix = pcx + (c.x - pcx) * interpAlpha;
+  piy = pcy + (c.y - pcy) * interpAlpha;
+  pia = pca + angDiff(c.angle, pca) * interpAlpha;
   updateCamera(dt);
   render();
   updatePanel();
@@ -1560,7 +1592,12 @@ window.__game = {
   get params() { return params; },
   // Manually advance the game when rAF is throttled (headless/testing).
   step(n = 1) {
-    for (let i = 0; i < n; i++) { physicsStep(); updateCamera(TICK); }
+    for (let i = 0; i < n; i++) {
+      physicsStep();
+      // Headless stepping renders at the exact current pose (no interpolation).
+      interpAlpha = 1; pix = state.car.x; piy = state.car.y; pia = state.car.angle;
+      updateCamera(TICK);
+    }
     render();
     updatePanel();
     return { x: state.car.x, y: state.car.y, cam: { ...camera } };
