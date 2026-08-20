@@ -24,12 +24,13 @@ import {
   TICK, G_PX, SURFACE, carParams, legacyParams, createCarState, stepCar, slipAngle,
   ZERO_LEVELS, DRIVING_UPGRADES, UPGRADE_BY_ID, levelsForBudget,
   insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "../physics.js?v=10";
+} from "../physics.js?v=11";
 import {
   SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
   simulateBotField, BOT_TIERS,
-} from "../bots.js?v=10";
-import * as T from "../track.js?v=10";
+  raceRacingLine, simulateRacingLineField, RACING_TIERS,
+} from "../bots.js?v=11";
+import * as T from "../track.js?v=11";
 
 // ---------------------------------------------------------------- scripted feature tests
 
@@ -717,6 +718,34 @@ function gridChecks(tracks) {
         startsAtSlot],
       [`[${id}] the five bot start positions are mutually distinct (no stacking on pole)`,
         startsDistinct]);
+
+    // The SEVEN-bot grid: the racing-line pair (LINE, ACE) sit on slots 6 and 7,
+    // behind the five reactive bots. gridSlot must place them on the road, and
+    // their recordings must actually start there (the load-bearing half — a slot
+    // that gridSlot computes but recordRace never consumes launches stacked).
+    const slots67 = [6, 7].map(k => T.gridSlot(k));
+    const behind67 = slots67.map(s => {
+      const i = T.nearestIndex(s.x, s.y);
+      return ((T.TRACK_LEN - T.CUMLEN[i]) % T.TRACK_LEN + T.TRACK_LEN) % T.TRACK_LEN;
+    });
+    // Behind slot 5 (arc), each further back, and on the racing surface.
+    const slot5behind = (() => {
+      const i = T.nearestIndex(slots[5].x, slots[5].y);
+      return ((T.TRACK_LEN - T.CUMLEN[i]) % T.TRACK_LEN + T.TRACK_LEN) % T.TRACK_LEN;
+    })();
+    const slots67OK = behind67[0] > slot5behind + 1 && behind67[1] > behind67[0] + 1 &&
+      slots67.every(s => T.surfaceAt(s.x, s.y) === SURFACE.ROAD);
+    const rlField = simulateRacingLineField(carParams(ZERO_LEVELS));
+    let rlStartsAtSlot = rlField.length === 2;
+    rlField.forEach((g, i) => {
+      const slot = T.gridSlot(6 + i);
+      if (!near(g.samples[0], [slot.x, slot.y])) rlStartsAtSlot = false;
+    });
+    checks.push(
+      [`[${id}] racing-line grid slots 6-7 (LINE, ACE) are on-road and further back than slot 5`,
+        slots67OK],
+      [`[${id}] the LINE and ACE recordings actually START at grid slots 6 and 7`,
+        rlStartsAtSlot]);
   }
   return checks;
 }
@@ -1308,6 +1337,168 @@ function cruiseChecks(maxDesignedSecs) {
   ];
 }
 
+// ------------------------------------------------ the racing-line family (LINE + ACE)
+//
+// The two racing-line bots are a DIFFERENT architecture (an offline
+// min-curvature line + friction-limited speed profile + a lookahead follower,
+// racingline.mjs) bolted on TOP of the five reactive tiers. Their gates are
+// ADDED here and kept deliberately separate from the reactive ladder, because
+// cross-family ordering is NOT globally monotonic: the CLEAN line (LINE) beats
+// the reactive drift bots on the grip/speed circuits but LOSES to them on stock
+// Ember (whose loops reward a boosted slide), so there is no single seven-bot
+// ladder to assert. Instead:
+//   LINE  completes valid laps, beats the old PRO clean-vs-clean on every track,
+//         stays on the road, is deterministic, and is monotonic-non-worse.
+//   ACE   is the FASTEST of all seven (never slower than any of them, and
+//         strictly faster than every REACTIVE bot), on road, deterministic,
+//         monotonic, and banks tier 2 where it drifts (Ember).
+// Measured from the POLE (START_POS), exactly as the reactive bots' raceBest is,
+// so the flying laps are directly comparable and ACE-vs-LINE is exact (ACE races
+// a superset that always includes the clean line, so it can never be slower).
+
+const RL_LINE = RACING_TIERS.find(t => t.key === "line");
+const RL_ACE = RACING_TIERS.find(t => t.key === "ace");
+
+// Monotonic-non-worse for a racing-line tier across a few +1 upgrade steps on
+// the ACTIVE track: buying one more level never makes it slower (1% tolerance,
+// matching the reactive sweep). Returns the worst % regression seen (<=0 = OK).
+function racingLineMono(tier, pairs) {
+  const lapOf = lv => {
+    const r = raceRacingLine(carParams(lv), tier, { laps: 3 });
+    return r ? r.bestFlyingTicks : null;
+  };
+  let worst = -Infinity, ok = true;
+  for (const [lo, hi] of pairs) {
+    const a = lapOf(lo), b = lapOf(hi);
+    if (a === null || b === null) { ok = false; continue; }
+    const pct = 100 * (b - a) / a;
+    if (pct > worst) worst = pct;
+    if (b > a * 1.01) ok = false;
+  }
+  return { ok, worst };
+}
+
+// Everything about LINE and ACE on the three DESIGNED circuits.
+function racingLineChecks(designed) {
+  const checks = [];
+  console.log("\nRACING-LINE FAMILY (LINE clean line + ACE drift overlay) — best flying lap, stock car:");
+  console.log("  " + pad("track", 10) + padL("PRO", 8) + padL("PRO++", 8) +
+    padL("LINE", 8) + padL("d(PRO)", 9) + padL("ACE", 8) + padL("d(PRO++)", 10) +
+    padL("ACEtier", 8) + padL("LINEmrg", 9) + padL("ACEmrg", 8));
+  // Mono sweep is heaviest on Ember (the only circuit with a drift plan to keep
+  // stable), lighter on the other two — mirroring the reactive sweep's full vs
+  // reduced split, to keep runtime sane.
+  const monoBase = [["speed", 6], ["grip", 6], ["accel", 6]];
+  const emberExtra = [["boostPwr", 6], ["boostDur", 6]];
+  for (const id of designed) {
+    T.setTrack(id);
+    const q = s => `[${id}] ${s}`;
+    const p = carParams(ZERO_LEVELS);
+    const roadHalf = T.ROAD_HALF;
+
+    const line = raceRacingLine(p, RL_LINE, { laps: 3 });
+    const ace = raceRacingLine(p, RL_ACE, { laps: 3 });
+    const line2 = raceRacingLine(p, RL_LINE, { laps: 3 });   // determinism re-run
+    const ace2 = raceRacingLine(p, RL_ACE, { laps: 3 });
+
+    const field = simulateBotField(p, { laps: 3 });           // the five reactive
+    const byKey = Object.fromEntries(field.map(b => [b.key, b.bestFlyingTicks]));
+    const pro = byKey.pro, pp = byKey.proplusplus;
+
+    const lineFly = line ? line.bestFlyingTicks : null;
+    const aceFly = ace ? ace.bestFlyingTicks : null;
+    const lineMargin = line ? roadHalf - line.maxDist : -Infinity;
+    const aceMargin = ace ? roadHalf - ace.maxDist : -Infinity;
+    // ACE is the fastest of all seven: strictly faster than every reactive bot
+    // and never slower than its clean stablemate LINE.
+    const beatsAllReactive = ace !== null && field.every(b => aceFly < b.bestFlyingTicks);
+    const deterministic = line2 && ace2 &&
+      line2.bestFlyingTicks === lineFly && ace2.bestFlyingTicks === aceFly &&
+      line2.samples.length === line.samples.length &&
+      ace2.samples.length === ace.samples.length;
+
+    // Monotonicity: 6->7 on each of the base upgrades, plus the boost pair on
+    // Ember (where ACE actually drifts, so the boost upgrades move it).
+    const pairsFor = up => up.map(([u, lv]) =>
+      [{ [u]: lv }, { [u]: lv + 1 }]);
+    const monoPairs = pairsFor(id === "ember" ? monoBase.concat(emberExtra) : monoBase);
+    const lineMono = racingLineMono(RL_LINE, monoPairs);
+    const aceMono = racingLineMono(RL_ACE, monoPairs);
+
+    console.log("  " + pad(id, 10) + padL(f(pro * TICK, 2), 8) + padL(f(pp * TICK, 2), 8) +
+      padL(f(lineFly * TICK, 2), 8) +
+      padL((pro > lineFly ? "-" : "+") + f(Math.abs(pro - lineFly) * TICK, 2) + "s", 9) +
+      padL(f(aceFly * TICK, 2), 8) +
+      padL((pp > aceFly ? "-" : "+") + f(Math.abs(pp - aceFly) * TICK, 2) + "s", 10) +
+      padL("t" + (ace ? ace.maxTierFired : "-"), 8) +
+      padL(f(lineMargin, 1) + "px", 9) + padL(f(aceMargin, 1) + "px", 8));
+
+    checks.push(
+      [q("[LINE] completes a valid 3-lap race from the pole"),
+        !!line && line.lapTicks.length === 3],
+      [q("[LINE] beats the old PRO clean-vs-clean on best flying lap"),
+        line !== null && lineFly < pro],
+      [q("[LINE] 3-lap race stays inside the road edge (car centre <= ROAD_HALF)"),
+        line !== null && lineMargin >= 0],
+      [q("[LINE] deterministic and monotonic-non-worse under +1 upgrades"),
+        deterministic && lineMono.ok],
+      [q("[ACE] completes a valid 3-lap race from the pole"),
+        !!ace && ace.lapTicks.length === 3],
+      [q("[ACE] is the FASTEST of all seven (beats every reactive bot incl PRO++)"),
+        beatsAllReactive],
+      [q("[ACE] is never slower than LINE (races a superset incl the clean line)"),
+        ace !== null && line !== null && aceFly <= lineFly],
+      [q("[ACE] 3-lap race stays inside the road edge (car centre <= ROAD_HALF)"),
+        ace !== null && aceMargin >= 0],
+      [q("[ACE] deterministic and monotonic-non-worse under +1 upgrades"),
+        deterministic && aceMono.ok]);
+
+    // Ember rewards the drift: ACE must overlay a real boosted slide, bank the
+    // ORANGE tier-2 charge, and beat the clean LINE by a felt margin. The
+    // grip/speed circuits have no chargeable corner, so ACE == LINE there and
+    // there is nothing to escalate (that is the cross-family truth this whole
+    // block exists to encode).
+    if (id === "ember") {
+      checks.push(
+        [q("[ACE] banks TIER 2 (the orange boost) where the racing line drifts (Ember)"),
+          ace !== null && ace.maxTierFired >= 2 && ace.boostFires > 0],
+        [q("[ACE] the drift overlay beats the clean LINE here by >= 0.3 s"),
+          ace !== null && line !== null && (lineFly - aceFly) * TICK >= 0.3]);
+    } else {
+      checks.push(
+        [q("[ACE] no chargeable corner here: it matches its clean LINE (no drift)"),
+          ace !== null && line !== null && aceFly === lineFly && ace.maxTierFired === 0]);
+    }
+  }
+  return checks;
+}
+
+// LINE and ACE on the CAPE CRUISE — the exempt fourth circuit. The only claim
+// is that the racing line CONVERGES and DRIVES a valid lap on a long, winding,
+// wide loop I only prototyped on the short tracks: the follower completes the
+// 2-lap field and stays on the road. No differentiation, no ladder (the cruise
+// rewards no upgrade), so ACE simply ties LINE (no drift plan exists here).
+function racingLineCruiseChecks() {
+  T.setTrack("cruise");
+  const q = s => `[cruise] ${s}`;
+  const p = carParams(ZERO_LEVELS);
+  const roadHalf = T.ROAD_HALF;
+  const line = raceRacingLine(p, RL_LINE, { laps: 2 });
+  const ace = raceRacingLine(p, RL_ACE, { laps: 2 });
+  const lineOK = !!line && line.lapTicks.length === 2 && (roadHalf - line.maxDist) >= 0;
+  const aceOK = !!ace && ace.lapTicks.length === 2 && (roadHalf - ace.maxDist) >= 0;
+  console.log(`  racing line on the cruise: LINE ${line ? (line.bestFlyingTicks * TICK).toFixed(1) + "s" : "FAIL"} ` +
+    `(margin ${line ? (roadHalf - line.maxDist).toFixed(0) : "-"}px), ` +
+    `ACE ${ace ? (ace.bestFlyingTicks * TICK).toFixed(1) + "s" : "FAIL"} ` +
+    `(margin ${ace ? (roadHalf - ace.maxDist).toFixed(0) : "-"}px)`);
+  return [
+    [q("[LINE] the racing line converges and drives a valid on-road lap on the cruise"), lineOK],
+    [q("[ACE] the racing line converges and drives a valid on-road lap on the cruise"), aceOK],
+    [q("[ACE] ties LINE on the cruise (a wide gentle loop rewards no drift)"),
+      line !== null && ace !== null && ace.bestFlyingTicks === line.bestFlyingTicks],
+  ];
+}
+
 // ---------------------------------------------------------------- modes
 
 function runSuite(paramsFor, label) {
@@ -1484,6 +1675,13 @@ function main() {
   // ---- the fourth circuit: CAPE CRUISE, its own small (exempt) check set ----
   const maxDesignedSecs = Math.max(...summaries.map(s => s.pro ?? 0));
   checks.push(...cruiseChecks(maxDesignedSecs));
+
+  // ---- the racing-line family (LINE + ACE): the strong challenge on top of
+  // the five reactive tiers, gated separately (cross-family ordering is not a
+  // single ladder — see racingLineChecks). Designed circuits get the full set;
+  // the cruise gets only "the line converges and drives a valid on-road lap".
+  checks.push(...racingLineChecks(DESIGNED));
+  checks.push(...racingLineCruiseChecks());
 
   console.log("\nAcceptance criteria:");
   let allPass = true;

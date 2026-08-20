@@ -5,7 +5,7 @@
 import {
   TICK, SURFACE, carParams, createCarState, stepCar,
   UPGRADE_DEFS, upgradeCost, insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "./physics.js?v=10";
+} from "./physics.js?v=11";
 // track.js exports the ACTIVE track's geometry as ES module live bindings, so
 // these names follow setTrack() with no re-import and no plumbing.
 // NOTE: the ?v= query on every internal import is deliberate cache-busting for
@@ -13,15 +13,15 @@ import {
 // will otherwise serve a STALE module for a bare URL like "./bots.js" while a
 // sibling ("./track.js") is fresh — a split that once left the F1 grid slots
 // computed but unused. Bump this token (and SAVE_VERSION) together on release.
-import * as T from "./track.js?v=10";
+import * as T from "./track.js?v=11";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
   TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
-} from "./track.js?v=10";
-import { botField } from "./bots.js?v=10";
+} from "./track.js?v=11";
+import { fullBotField } from "./bots.js?v=11";
 // Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
 // per track from geometry + a seeded PRNG and cached. Rendered under the road.
-import { getDecor, PALETTE } from "./decor.js?v=10";
+import { getDecor, PALETTE } from "./decor.js?v=11";
 
 // ---------------------------------------------------------------- constants
 
@@ -190,13 +190,18 @@ const camera = {
   driftBias: 0,   // px smoothed slip-proportional lateral bias while drifting
   pulse: 0,       // 0..1 boost-fire pulse (drives zoom-out + forward kick)
 };
-// Bot reference ghosts ("is it just me?" calibration): four bot tiers, each
+// Bot reference ghosts ("is it just me?" calibration): SEVEN bot tiers, each
 // a full THREE-LAP RACE from rest on the grid (lap 1 standing, laps 2-3
 // flying), SIMULATED IN THE BROWSER on demand by bots.js.
+//   Five REACTIVE (pursuit) tiers — the classic, human-style family:
 //   NOVICE — timid keyboard driver.      MID — clean line, never drifts.
 //   PRO — the optimal clean lap: brakes for the hairpin, never drifts.
-//   PRO+ — slides the corners its corner analyser marks as drift zones and
-//   fires the banked boost, worth ~1.5 s (13%) a lap over PRO.
+//   PRO+ — slides the analyser's drift zones and fires the banked boost.
+//   PRO++ — the fastest reactive bot, banks the orange tier-2 boost on Ember.
+//   Two RACING-LINE tiers — an offline min-curvature line + speed profile:
+//   LINE — the clean racing line (silver), faster than PRO on every circuit.
+//   ACE  — the racing line PLUS a drift/boost overlay (orange): the FASTEST
+//   bot of all seven, banking tier 2 where the line rewards a slide (Ember).
 // They drive YOUR CURRENT CAR (the same carParams(state.drivingLevels) you do), so
 // buying an upgrade makes them quicker too and the race stays about driving.
 // Purely visual — they never earn currency.
@@ -214,7 +219,7 @@ let lastSimMs = 0;      // ms the last (uncached) field simulation took
 // that ends. loopStart = end of lap 1, loopLen = lap 2's length; both crossings
 // are on the start line, so the wrap is seamless.
 function refreshBotField() {
-  const field = botField(params);
+  const field = fullBotField(params);
   if (field.simMs) lastSimMs = field.simMs;
   // Keep playback position across a re-simulation so buying an upgrade
   // mid-race does not teleport the field back to the grid.
@@ -223,7 +228,7 @@ function refreshBotField() {
     const loopStart = g.lapTicks[0];
     const loopLen = g.lapTicks[1] ?? Math.max(1, g.samples.length - 1 - loopStart);
     return {
-      label: g.label, short: g.short, body: g.body, text: g.text,
+      key: g.key, label: g.label, short: g.short, body: g.body, text: g.text,
       samples: g.samples,
       standing: g.lapTicks[0],
       bestFlying: g.bestFlyingTicks,
@@ -238,14 +243,24 @@ function refreshBotField() {
 function updateRefLaps() {
   // Displayed times are each bot's best FLYING lap of its 3-lap race — the
   // like-for-like comparison against your own flying laps (their lap 1 is
-  // ~1.2-1.9 s slower because it starts from rest on the grid). Five tiers
-  // is too wide for one panel row: wrap two per color-coded line (three lines).
-  const bits = botGhosts.map(g =>
+  // ~1.2-1.9 s slower because it starts from rest on the grid). SEVEN tiers is
+  // too wide for one panel row, so the two families each get their own set of
+  // lines: the five reactive tiers wrap two-per-line (Nov/Mid, Pro/Pro+, Pro++),
+  // then the racing-line pair (LINE, ACE) share the final line. Keeps it compact
+  // and readable without overflowing the panel.
+  const bit = g =>
     `<span style="color:${g.text}" title="${g.label}: lap 1 (standing) ` +
     `${(g.standing / 60).toFixed(2)}s, best flying ${(g.bestFlying / 60).toFixed(2)}s">` +
-    `${g.short} ${(g.bestFlying / 60).toFixed(1)}s</span>`);
+    `${g.short} ${(g.bestFlying / 60).toFixed(1)}s</span>`;
+  // Split the field back into its two families by tier key.
+  const RL = new Set(["line", "ace"]);
+  const classic = botGhosts.filter(g => !RL.has(g.key));
+  const racing = botGhosts.filter(g => RL.has(g.key));
   const lines = [];
-  for (let i = 0; i < bits.length; i += 2) lines.push(bits.slice(i, i + 2).join(" "));
+  for (let i = 0; i < classic.length; i += 2) {
+    lines.push(classic.slice(i, i + 2).map(bit).join(" "));
+  }
+  if (racing.length) lines.push(racing.map(bit).join(" "));
   el("refLaps").innerHTML = lines.length ? lines.join("<br>") : "–";
 }
 
@@ -285,10 +300,12 @@ function driftMarkFor(store, key, x, y, angle, prevX, prevY) {
 let wasDrifting = false;
 let boostFlash = 0;     // ticks of "BOOST!" text remaining
 let boostFlashTier = 1;
-// F1 GRID START. The player sits on POLE (START_POS) and the five bots on grid
-// slots 1..5 (NOVICE, MID, PRO, PRO+, PRO++), each further back along the start
-// straight — their recordings begin at v=0 on their own slot, so the launch
-// spreads the field into an F1 stagger. Nobody moves until GO: the START menu's
+// F1 GRID START. The player sits on POLE (START_POS) and the seven bots on grid
+// slots 1..7 (NOVICE, MID, PRO, PRO+, PRO++, then LINE and ACE at the back),
+// each further back along the start straight — their recordings begin at v=0 on
+// their own slot, so the launch spreads the field into an F1 stagger. The
+// racing-line pair grid up behind the reactive five: slowest classic just behind
+// the player, the fastest ACE at the very back. Nobody moves until GO: the START menu's
 // countdown reaches zero, `phase` becomes "racing", and everyone launches
 // together with no player input required. R just resets you to the line; the
 // first visit to a track runs the countdown, later visits skip straight to it.

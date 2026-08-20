@@ -79,7 +79,8 @@ back to `true` and saving works exactly as before.
   barely slows the car (use the brake to slow down)
 - **R** — re-grid: the whole field back on the F1 grid and the **3‑2‑1‑GO
   countdown** re-run (aborts the current lap and resets the endless lap tally)
-- **G** — toggle the NOVICE/MID/PRO/PRO+/PRO++ bot reference ghosts
+- **G** — toggle the seven bot reference ghosts (NOVICE/MID/PRO/PRO+/PRO++,
+  plus the racing-line LINE and ACE)
 - **Mouse scroll wheel** (over the track) — zoom out to survey most of the
   track, or back in (reset by a refresh while persistence is off)
 - **Track buttons** (top of the side panel: Ember / Longshore / Lantern /
@@ -101,8 +102,9 @@ accelerates off the grid together. **R** re-grids and re-runs the countdown at
 any time.
 
 The field lines up like an F1 grid, staggered back along the start straight:
-**player on POLE, then NOVICE 2nd, MID 3rd, PRO 4th, PRO+ 5th, PRO++ 6th**, each
-a car-length-and-gap further back than the one ahead with a slight left/right
+**player on POLE, then NOVICE 2nd, MID 3rd, PRO 4th, PRO+ 5th, PRO++ 6th, then
+the racing-line LINE 7th and ACE 8th (at the very back)**, each a
+car-length-and-gap further back than the one ahead with a slight left/right
 zigzag. The slots are derived from the start-straight geometry (walked backward
 along the centerline, so they follow the track round a corner behind the line
 rather than running off into the grass) and each bot's simulated run *starts
@@ -110,7 +112,7 @@ from its own slot* — so the further-back cars have a longer run to the line an
 the F1 spread falls out of the launch, not from an animation.
 
 **Then it is endless.** There is no fixed race length. After GO the player
-drives freely forever while the five bots loop their flying lap continuously as
+drives freely forever while the seven bots loop their flying lap continuously as
 the pace reference. The side panel's *Laps* row is an endless tally. Each lap
 must still hit every checkpoint gate in order (4 gates on Ember and Longshore, 7
 on Lantern) to count — though the gates are generous about *how* you hit them,
@@ -638,10 +640,84 @@ each tier's best **flying** lap, since that is the like-for-like comparison
 against your own laps 2 and 3; hover a time to see its standing lap too.
 
 They earn nothing - they are pure pace references. The whole field grids up F1
-style (player on pole, the five bots on slots 1..5 further back) and holds until
-GO: the countdown reaches zero and **everyone launches together with no player
-input required**, a fair standing start that tests acceleration equally. Each
-bot then loops its flying lap endlessly. Toggle them with **G**.
+style (player on pole, the **seven** bots on slots 1..7 further back) and holds
+until GO: the countdown reaches zero and **everyone launches together with no
+player input required**, a fair standing start that tests acceleration equally.
+Each bot then loops its flying lap endlessly. Toggle them with **G**.
+
+### The racing-line family — LINE and ACE (the strong challenge)
+
+The five bots above are all **reactive**: a pure-pursuit controller that chases
+a look-ahead point on the *centerline* and reacts to the curvature it sees, tick
+by tick. On top of them ride two more bots built on a completely different
+architecture — an **offline racing line** (`racingline.mjs`), computed once per
+track, then driven by a follower. They grid up on slots **6 (LINE)** and
+**7 (ACE)**, behind the reactive five, with the fastest bot (ACE) at the very
+back so it has the whole field to come through.
+
+**How the racing line is built** — three stages, all offline, none reactive:
+
+1. **The line** — a **minimum-curvature** racing line on the closed loop. Every
+   point is offset along the road normal, `p_i = c_i + e_i · n_i`, with `e_i`
+   bounded so the whole *car* (not just its centre) stays on the road
+   (`|e| <= ROAD_HALF - CAR_HALF_W - margin`). A taut-string / projected-Laplacian
+   flow pulls the line to the inside of each corner and opens the entry/exit,
+   which genuinely lowers the curvature the car has to drive — so it hugs the
+   apex and uses the width of the road, unlike a centerline follower. The line is
+   **car-independent** (pure geometry), so it is computed once and **cached per
+   track**.
+2. **The speed profile** — a **friction-limited** target speed at every point.
+   Apex speed is `sqrt(a_lat · R)` capped by the yaw-rate ceiling, then a
+   backward pass brakes into every corner (`sqrt(v_next² + 2·a_brake·ds`) and a
+   forward pass limits acceleration out of it. `a_accel` / `a_brake` are
+   **measured empirically** by stepping the real `physics.js` car (the nominal
+   figures are pre-drag), so the profile brakes exactly where the car actually
+   can. This recomputes per car spec.
+3. **The follower** — drives `stepCar` with **pure-pursuit** steering toward a
+   look-ahead point *on the line* and throttle/brake toward the local profile
+   speed, braking ahead so it is never caught out between samples. It uses a
+   grip **safety factor** (reported by the harness) so the car can actually hold
+   the planned line. Fully deterministic — no PRNG anywhere in this path.
+
+Both bots pick their line by **racing a small matrix** — a ladder of line
+solvers × grip-safety values — and keeping the fastest one that stays **on the
+road** (car centre within `ROAD_HALF`, the strict standard). That per-spec
+choice is cached, so re-gridding and buying upgrades stay cheap.
+
+| bot | what it is | how it drives |
+|---|---|---|
+| silver **LINE** | the **clean** racing line | the line + profile + follower. No handbrake, no boost. |
+| orange **ACE** | the racing line **+ a drift/boost overlay** | additionally overlays `deriveDriftZones` (the *same* machinery PRO+/PRO++ use) on the geometrically fast corners, races the boosted variant against the clean line, and keeps whichever is faster on-road. |
+
+**LINE** beats the old **PRO** clean-vs-clean on *every* circuit (the geometry
+of a real racing line beats a centerline pursuit), and beats the reactive drift
+bots on the grip and speed circuits too:
+
+| circuit | old PRO | **LINE** | LINE vs PRO | old PRO++ | **ACE** | ACE vs PRO++ | ACE tier |
+|---|---|---|---|---|---|---|---|
+| **EMBER** (drift) | 9.78 | **8.72** | −1.07 s | 8.18 | **7.83** | **−0.35 s** | **tier 2 (orange)** |
+| **LONGSHORE** (speed) | 12.73 | **12.22** | −0.52 s | 12.40 | **12.22** | −0.18 s | — |
+| **LANTERN** (grip) | 10.83 | **8.28** | −2.55 s | 9.32 | **8.28** | −1.03 s | — |
+
+**ACE is the fastest bot of all seven**, on every track — but the story is
+honest and *not* a single global ladder, because cross-family ordering is not
+monotonic. On **Ember** the clean line LOSES to the reactive drift bots (its
+loops reward a boosted slide), so ACE's drift overlay earns its keep: it
+handbrake-slides both loops on the racing line, banks the **orange tier-2**
+charge and fires it down the straights — **7.83 s, beating PRO++** and showing
+an orange boost flame, exactly like PRO++'s. On **Longshore / Lantern / Cruise**
+no corner is long enough to bank a charge (the same reason PRO+ never drifts
+there), so ACE simply *is* the clean racing line — which already beats every
+reactive bot. So ACE ties LINE on those circuits (same line, same pace — ACE
+just grid-starts one slot further back) and pulls away only on Ember. ACE races
+a superset of LINE's strategies that always includes the clean line, so it can
+**never be slower than LINE**, and the harness gates that plus monotonicity (an
+upgrade never makes either bot slower) across the upgrade space.
+
+The **Cape Cruise** — a long, wide, winding loop I only prototyped the line on
+for the three short circuits — is also handled: the min-curvature flow converges,
+the follower stays on the road, and both LINE and ACE drive a valid ~99 s lap
+(the cruise rewards no drift, so ACE ties LINE there).
 
 ### The grid + countdown loop
 

@@ -15,8 +15,17 @@
 // ?v= cache-busting: keep in lockstep with main.js's imports (see the note
 // there) so a caching server can't serve a stale bots.js against a fresh
 // track.js — the split that left the F1 grid computed but unused.
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=10";
-import * as T from "./track.js?v=10";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=11";
+import * as T from "./track.js?v=11";
+// The racing-line family (LINE + ACE) is a DIFFERENT driver architecture from
+// the reactive pure-pursuit bots above: an offline min-curvature racing line +
+// friction-limited speed profile, driven by a lookahead follower (racingline.mjs).
+// bots.js owns the drift plan (deriveDriftZones) and feeds it to ACE's follower,
+// so racingline.mjs stays free of any bots.js dependency (no import cycle).
+import {
+  carLimitsFor, computeRacingLine, speedProfile, runFollower,
+  LINE_LADDER, SAFETY_LADDER,
+} from "./racingline.mjs";
 
 // ---------------------------------------------------------------- PRNG
 
@@ -1329,5 +1338,159 @@ export function botField(params, opts = {}) {
   if (fieldCache.size > FIELD_CACHE_MAX) {
     fieldCache.delete(fieldCache.keys().next().value);
   }
+  return field;
+}
+
+// -------------------------------------------------- the racing-line family
+//
+// Two MORE bots on top of the five reactive tiers, produced by the offline
+// racing-line follower (racingline.mjs) rather than the reactive pursuit
+// controller. They grid up on slots 6 and 7 (behind the five classic bots) and
+// produce recordings in the SAME shape (samples [x,y,angle], lapTicks, boosts),
+// so the game's rendering, ghost drift-marks/flames and F1 launch all work on
+// them unchanged.
+//
+//   LINE — the CLEAN racing line: min-curvature line + friction-limited profile,
+//          no handbrake, no boost. Faster than the old PRO on every circuit
+//          (the geometry of the line beats a centerline pursuit), and faster
+//          than the drift bots on the grip/speed circuits.
+//   ACE  — the racing line PLUS a drift/boost overlay: it races the clean line
+//          against drift plans derived by deriveDriftZones (the same machinery
+//          PRO+/PRO++ use) over a small line/safety matrix and keeps whichever
+//          is fastest ON-ROAD. On Ember (whose loops reward a boosted slide) it
+//          drifts and banks the orange tier-2 charge; on the grip/speed
+//          circuits no corner is chargeable, so it falls back to the clean line
+//          — which already beats every reactive bot there. The FASTEST bot of
+//          all seven on every track (never slower than any of them).
+export const RACING_TIERS = [
+  // Silver-white — reads as the fast, clinical clean line; distinct from the
+  // five reactive colours (green/purple/cyan/gold/magenta) and the player red.
+  { key: "line", skill: "line", label: "LINE", short: "Line", drift: false,
+    body: "#e8ecf2", text: "rgba(232,236,242,0.9)" },
+  // Bright orange — the front of the whole field; distinct from PRO+'s gold and
+  // the player's red, and it matches ACE's own orange tier-2 boost flame.
+  { key: "ace", skill: "ace", label: "ACE", short: "Ace", drift: true,
+    body: "#ff7a1a", text: "rgba(255,122,26,0.95)" },
+];
+
+// The drift plans ACE overlays (only the tier-2-forced plan differs on a corner
+// long enough to bank the orange charge). Uses PRO++'s cornering budget as the
+// planner's reference, exactly like the reactive tier.
+function aceDriftPlans(params) {
+  const plans = [];
+  const auto = deriveDriftZones(params, SKILLS.proplusplus);
+  if (auto.zones.length) plans.push(auto);
+  const t2 = deriveDriftZones(params, SKILLS.proplusplus, { targetTier: 2 });
+  if (t2.zones.length) plans.push(t2);
+  return plans;
+}
+
+// Choose the fastest ON-ROAD { line, prof, drift } for the active track and car
+// by racing a line/safety matrix (and, for ACE, each drift plan). "On road" is
+// the car CENTRE within ROAD_HALF — the strict standard, so the racing-line
+// bots never even clip the edge. Deterministic (no PRNG anywhere in this path).
+// The line ladder is cached per track in racingline.mjs (car-independent), so
+// this is a profile-and-follower race, which is the cheap part.
+function chooseRacingLine(trackId, limits, params, withDrift) {
+  const roadHalf = T.ROAD_HALF;
+  const driftPlans = [null];
+  if (withDrift) for (const d of aceDriftPlans(params)) driftPlans.push(d);
+  // A long circuit (the cruise) is several minutes a lap, so the config race
+  // uses 2 laps (one standing + one flying) instead of 4 — the follower is
+  // deterministic, so a single flying lap picks the same config for a fraction
+  // of the cost. Short circuits keep 4 for a touch more margin.
+  const chooseLaps = T.TRACK_LEN > LONG_TRACK_LEN ? 2 : 4;
+  let best = null, bestOnRoad = null;
+  for (const lineOpt of LINE_LADDER) {
+    const line = computeRacingLine(trackId, null, lineOpt);
+    for (const gripSafety of SAFETY_LADDER) {
+      const prof = speedProfile(line, limits, { gripSafety });
+      for (const drift of driftPlans) {
+        const r = runFollower(trackId, null, { line, prof, limits, laps: chooseLaps, drift });
+        if (!r.valid) continue;
+        const rec = { line, prof, drift, t: r.bestFlyingTicks, maxDist: r.maxDistFlying };
+        if (!best || rec.t < best.t) best = rec;
+        if (rec.maxDist <= roadHalf && (!bestOnRoad || rec.t < bestOnRoad.t)) bestOnRoad = rec;
+      }
+    }
+  }
+  return bestOnRoad || best;
+}
+
+// Per-(track, spec, tier) cache of the chosen config: choosing races the whole
+// matrix (~tens of profile+follower runs), so re-gridding the SAME car must not
+// redo it. Keyed like the reactive field cache.
+const RL_CFG_CACHE = new Map();
+const RL_CFG_MAX = 24;
+function racingLineConfig(trackId, params, tier) {
+  const key = fieldSignature(params) + "|" + tier.key;
+  const hit = RL_CFG_CACHE.get(key);
+  if (hit) return hit;
+  const limits = carLimitsFor(params);
+  const cfg = chooseRacingLine(trackId, limits, params, tier.drift);
+  cfg.limits = limits;
+  RL_CFG_CACHE.set(key, cfg);
+  if (RL_CFG_CACHE.size > RL_CFG_MAX) RL_CFG_CACHE.delete(RL_CFG_CACHE.keys().next().value);
+  return cfg;
+}
+
+// Simulate LINE and ACE for `params` on the ACTIVE track: each is a standing
+// start from its grid slot (6, 7 — behind the five reactive bots), `laps` laps.
+// Returns entries shaped exactly like simulateBotField's (samples, lapTicks,
+// bestFlyingTicks, standingTicks, totalTicks, boostFires, maxTierFired, ...),
+// with a `simMs` on the array for reporting. Slot count = the five reactive
+// bots (BOT_TIERS) + these two = seven behind the player's pole.
+export function simulateRacingLineField(params, opts = {}) {
+  const laps = opts.laps ?? fieldLaps();
+  const t0 = (typeof performance !== "undefined" ? performance : Date).now();
+  const out = [];
+  RACING_TIERS.forEach((tier, i) => {
+    const slotK = BOT_TIERS.length + 1 + i;      // 5 reactive on 1..5, LINE 6, ACE 7
+    const rec = raceRacingLine(params, tier, { laps, start: T.gridSlot(slotK) });
+    if (rec) out.push(rec);
+  });
+  out.simMs = (typeof performance !== "undefined" ? performance : Date).now() - t0;
+  return out;
+}
+
+// Produce ONE racing-line tier's recording on the active track, from `opts.start`
+// (a grid slot) or the pole if omitted. The pole variant is how the harness
+// measures the LINE/ACE ladder — the same START_POS the reactive bots' raceBest
+// uses — so their flying laps are directly comparable (identical start, so ACE
+// is provably never slower than LINE: it races a superset that includes the
+// clean line). Returns a { ...tier, ...recording } or null if no valid laps.
+export function raceRacingLine(params, tier, opts = {}) {
+  const trackId = T.TRACK_ID;
+  const laps = opts.laps ?? fieldLaps();
+  const cfg = racingLineConfig(trackId, params, tier);
+  const rec = runFollower(trackId, null, {
+    line: cfg.line, prof: cfg.prof, drift: cfg.drift, limits: cfg.limits,
+    start: opts.start, laps,
+  });
+  return rec && rec.valid ? { ...tier, ...rec } : null;
+}
+
+// Memoised, mirroring botField: keyed on (car spec + track + lap count).
+const rlFieldCache = new Map();
+export function racingLineField(params, opts = {}) {
+  const key = fieldSignature(params) + "|rl|laps=" + (opts.laps ?? fieldLaps());
+  const hit = rlFieldCache.get(key);
+  if (hit) { hit.simMs = 0; rlFieldCache.delete(key); rlFieldCache.set(key, hit); return hit; }
+  const field = simulateRacingLineField(params, opts);
+  rlFieldCache.set(key, field);
+  if (rlFieldCache.size > FIELD_CACHE_MAX) {
+    rlFieldCache.delete(rlFieldCache.keys().next().value);
+  }
+  return field;
+}
+
+// The whole SEVEN-bot field: the five reactive tiers plus LINE and ACE, in grid
+// order (novice ... proplusplus, then LINE, then ACE at the back). One call for
+// the game; simMs is the sum of whatever actually re-simulated this call.
+export function fullBotField(params, opts = {}) {
+  const classic = botField(params, opts);
+  const racing = racingLineField(params, opts);
+  const field = classic.concat(racing);
+  field.simMs = (classic.simMs || 0) + (racing.simMs || 0);
   return field;
 }
