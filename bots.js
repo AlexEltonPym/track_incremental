@@ -15,8 +15,8 @@
 // ?v= cache-busting: keep in lockstep with main.js's imports (see the note
 // there) so a caching server can't serve a stale bots.js against a fresh
 // track.js — the split that left the F1 grid computed but unused.
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=11";
-import * as T from "./track.js?v=11";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=12";
+import * as T from "./track.js?v=12";
 // The racing-line family (LINE + ACE) is a DIFFERENT driver architecture from
 // the reactive pure-pursuit bots above: an offline min-curvature racing line +
 // friction-limited speed profile, driven by a lookahead follower (racingline.mjs).
@@ -1305,7 +1305,11 @@ export function simulateBotField(params, opts = {}) {
   // naturally, and the flying laps that follow are the endless pace reference.
   BOT_TIERS.forEach((tier, ti) => {
     const base = SKILLS[tier.skill];
-    const start = T.gridSlot(ti + 1);
+    // opts.stacked = a fair-comparison mode: every bot starts from the player's
+    // pole (slot 0) instead of its own staggered grid slot, so they all launch
+    // from the same point. The harness never passes it, so the real F1 grid and
+    // its distinctness checks are unaffected.
+    const start = T.gridSlot(opts.stacked ? 0 : ti + 1);
     for (const off of SEED_FALLBACKS) {
       const rec = raceBest(off ? { ...base, seed: base.seed + off } : base,
         params, { laps, start });
@@ -1325,7 +1329,7 @@ export function simulateBotField(params, opts = {}) {
 const FIELD_CACHE_MAX = 8;
 const fieldCache = new Map();
 export function botField(params, opts = {}) {
-  const key = fieldSignature(params) + "|laps=" + (opts.laps ?? fieldLaps());
+  const key = fieldSignature(params) + "|laps=" + (opts.laps ?? fieldLaps()) + (opts.stacked ? "|stacked" : "");
   const hit = fieldCache.get(key);
   if (hit) {
     hit.simMs = 0;              // served from cache
@@ -1446,7 +1450,7 @@ export function simulateRacingLineField(params, opts = {}) {
   const out = [];
   RACING_TIERS.forEach((tier, i) => {
     const slotK = BOT_TIERS.length + 1 + i;      // 5 reactive on 1..5, LINE 6, ACE 7
-    const rec = raceRacingLine(params, tier, { laps, start: T.gridSlot(slotK) });
+    const rec = raceRacingLine(params, tier, { laps, start: T.gridSlot(opts.stacked ? 0 : slotK) });
     if (rec) out.push(rec);
   });
   out.simMs = (typeof performance !== "undefined" ? performance : Date).now() - t0;
@@ -1473,7 +1477,7 @@ export function raceRacingLine(params, tier, opts = {}) {
 // Memoised, mirroring botField: keyed on (car spec + track + lap count).
 const rlFieldCache = new Map();
 export function racingLineField(params, opts = {}) {
-  const key = fieldSignature(params) + "|rl|laps=" + (opts.laps ?? fieldLaps());
+  const key = fieldSignature(params) + "|rl|laps=" + (opts.laps ?? fieldLaps()) + (opts.stacked ? "|stacked" : "");
   const hit = rlFieldCache.get(key);
   if (hit) { hit.simMs = 0; rlFieldCache.delete(key); rlFieldCache.set(key, hit); return hit; }
   const field = simulateRacingLineField(params, opts);

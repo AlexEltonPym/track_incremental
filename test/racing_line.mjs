@@ -17,9 +17,9 @@
 //
 // Additive only: imports the shipped modules unchanged (same ?v=11 token).
 
-import { TICK, carParams, ZERO_LEVELS } from "../physics.js?v=11";
-import { simulateBotField, BOT_TIERS } from "../bots.js?v=11";
-import * as T from "../track.js?v=11";
+import { TICK, carParams, ZERO_LEVELS } from "../physics.js?v=12";
+import { simulateBotField, BOT_TIERS } from "../bots.js?v=12";
+import * as T from "../track.js?v=12";
 import {
   carLimits, computeRacingLine, speedProfile, runFollower, optimizeLine,
   CAR_HALF_W,

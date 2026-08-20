@@ -5,7 +5,7 @@
 import {
   TICK, SURFACE, carParams, createCarState, stepCar,
   UPGRADE_DEFS, upgradeCost, insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "./physics.js?v=11";
+} from "./physics.js?v=12";
 // track.js exports the ACTIVE track's geometry as ES module live bindings, so
 // these names follow setTrack() with no re-import and no plumbing.
 // NOTE: the ?v= query on every internal import is deliberate cache-busting for
@@ -13,15 +13,15 @@ import {
 // will otherwise serve a STALE module for a bare URL like "./bots.js" while a
 // sibling ("./track.js") is fresh — a split that once left the F1 grid slots
 // computed but unused. Bump this token (and SAVE_VERSION) together on release.
-import * as T from "./track.js?v=11";
+import * as T from "./track.js?v=12";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
   TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
-} from "./track.js?v=11";
-import { fullBotField } from "./bots.js?v=11";
+} from "./track.js?v=12";
+import { fullBotField } from "./bots.js?v=12";
 // Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
 // per track from geometry + a seeded PRNG and cached. Rendered under the road.
-import { getDecor, PALETTE } from "./decor.js?v=11";
+import { getDecor, PALETTE } from "./decor.js?v=12";
 
 // ---------------------------------------------------------------- constants
 
@@ -218,8 +218,13 @@ let lastSimMs = 0;      // ms the last (uncached) field simulation took
 // forever, so the four bots are a continuous pace reference rather than a race
 // that ends. loopStart = end of lap 1, loopLen = lap 2's length; both crossings
 // are on the start line, so the wrap is seamless.
+// TEMPORARY fair-comparison mode: stack the whole field on the player's pole so
+// every car launches from the same point (no F1-grid stagger). Flip back to
+// false to restore the staggered grid — the harness always uses the real grid.
+const STACKED_START = true;
+
 function refreshBotField() {
-  const field = fullBotField(params);
+  const field = fullBotField(params, { stacked: STACKED_START });
   if (field.simMs) lastSimMs = field.simMs;
   // Keep playback position across a re-simulation so buying an upgrade
   // mid-race does not teleport the field back to the grid.
