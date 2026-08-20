@@ -830,7 +830,10 @@ function sampleSpeed(samples, i) {
 // car sits over the flame root.
 function ghostFlame(x, y, angle, speed, alpha) {
   const over = speed / params.topSpeed;
-  if (over < 1.06) return;                       // only when clearly boosting
+  // 1.06..1.6 = a real boost (tier 2 peaks ~1.45x top). Below is normal driving;
+  // ABOVE is the recording's loop seam (end sample -> grid start), e.g. a bot
+  // parked on the grid — never a real boost, so no flame.
+  if (over < 1.06 || over > 1.6) return;
   const tier2 = over > 1.30;
   ctx.save();
   ctx.globalAlpha = alpha;
