@@ -1285,11 +1285,11 @@ function render() {
     ctx.fillText(tier > 0 ? `DRIFT ${"+".repeat(tier)}` : "DRIFT", 14, 26);
   }
   if (boostFlash > 0) {
-    const t = boostFlash / 55;                        // 1 -> 0
+    const t = Math.max(0, boostFlash - interpAlpha) / 55;   // 1 -> 0, sub-tick smooth
     ctx.save();
     ctx.globalAlpha = Math.min(1, t * 2.5);
     ctx.fillStyle = `rgba(${TIER_RGB[boostFlashTier]},1)`;
-    ctx.font = `bold ${Math.round(24 + 6 * (1 - t))}px sans-serif`;
+    ctx.font = `bold ${(24 + 6 * (1 - t)).toFixed(2)}px sans-serif`;
     ctx.textAlign = "center";
     ctx.fillText(boostFlashTier === 2 ? "SUPER BOOST!" : "BOOST!", CANVAS_W / 2, CANVAS_H * 0.30);
     ctx.restore();
@@ -1302,11 +1302,14 @@ function render() {
     // between physics ticks instead of stepping (the same jitter fix as the car).
     const cont = state.countdown - interpAlpha;
     const num = Math.max(1, Math.ceil(cont / 60));    // 3, 2, 1
-    const frac = ((cont % 60) + 60) % 60 / 60;        // 1 -> 0 within each second
+    // Position within THIS number's second: 1 at its start -> 0 at its end. Tied
+    // to `num` so there's no sawtooth mid-count (the old `cont % 60` snapped the
+    // font big for a frame at each boundary — that was the wiggle).
+    const frac = Math.max(0, Math.min(1, (cont - 60 * (num - 1)) / 60));
     ctx.save();
     ctx.globalAlpha = 0.35 + 0.65 * frac;
     ctx.fillStyle = "#ffc857";
-    ctx.font = `bold ${Math.round(96 + 40 * (1 - frac))}px sans-serif`;
+    ctx.font = `bold ${(96 + 40 * (1 - frac)).toFixed(2)}px sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(String(num), CANVAS_W / 2, CANVAS_H * 0.42);
@@ -1318,7 +1321,7 @@ function render() {
     ctx.save();
     ctx.globalAlpha = Math.min(1, t * 2);
     ctx.fillStyle = "#6fe08b";
-    ctx.font = `bold ${Math.round(110 + 30 * (1 - t))}px sans-serif`;
+    ctx.font = `bold ${(110 + 30 * (1 - t)).toFixed(2)}px sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("GO!", CANVAS_W / 2, CANVAS_H * 0.42);
