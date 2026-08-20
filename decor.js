@@ -300,7 +300,7 @@ function build(track) {
   // on the huge Cape Cruise a full-bbox scatter would spend most of its tries in
   // empty space far from the corridor and dominate the build time.
   const placeCorridor = (n, make) => {
-    let made = 0, tries = 0, cap = n * 8;
+    let made = 0, tries = 0, cap = n * 16;
     while (made < n && tries < cap) {
       tries++;
       const i = track.indexAtArc(rng() * TRACK_LEN);
@@ -312,13 +312,13 @@ function build(track) {
       const x = p[0] - ty * side * o, y = p[1] + tx * side * o;
       const d = dist(x, y);
       if (d <= roadClear || d >= inner) continue;   // stay in the grass corridor
-      if (inLake(x, y, 4) || nearTree(x, y, 3)) continue;
-      make(x, y); made++;
+      if (inLake(x, y, 4)) continue;
+      if (make(x, y)) made++;                        // maker rejects tree/detail overlap
     }
   };
   const placeClearings = (n, make) => {
     if (!clearings.length) return;
-    let made = 0, tries = 0, cap = n * 10;
+    let made = 0, tries = 0, cap = n * 20;
     while (made < n && tries < cap) {
       tries++;
       const c = clearings[Math.floor(rng() * clearings.length)];
@@ -326,14 +326,53 @@ function build(track) {
       const x = c.cx + Math.cos(ang) * rad, y = c.cy + Math.sin(ang) * rad;
       if (!inClearing(x, y)) continue;
       const d = dist(x, y);
-      if (d <= roadClear || inLake(x, y, 4) || nearTree(x, y, 3)) continue;
-      make(x, y); made++;
+      if (d <= roadClear || inLake(x, y, 4)) continue;
+      if (make(x, y)) made++;                        // maker rejects tree/detail overlap
     }
   };
   const rocks = [], bushes = [], flowers = [];
-  const mkRock = (x, y) => rocks.push([x, y, 4 + rng() * 9, Math.floor(rng() * PALETTE.rocks.length)]);
-  const mkBush = (x, y) => bushes.push([x, y, 5 + rng() * 9, Math.floor(rng() * PALETTE.bushes.length)]);
-  const mkFlower = (x, y) => flowers.push([x, y, Math.floor(rng() * PALETTE.flowers.length)]);
+  // Unified occupancy hash of placed ground detail, so no two of them overlap
+  // (a flower on a bush, a rock on a flower, ...). Trees are handled by nearTree.
+  const DCELL = 48;
+  const detailGrid = new Map();
+  const addDetail = (x, y, r) => {
+    const k = Math.floor(x / DCELL) + "," + Math.floor(y / DCELL);
+    let a = detailGrid.get(k); if (!a) { a = []; detailGrid.set(k, a); } a.push([x, y, r]);
+  };
+  // A candidate is clear if it overlaps no tree canopy and no already-placed
+  // detail (radii + a small gap).
+  const clearAt = (x, y, r) => {
+    if (nearTree(x, y, 2)) return false;
+    const cx = Math.floor(x / DCELL), cy = Math.floor(y / DCELL);
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const a = detailGrid.get(gx + "," + gy);
+        if (!a) continue;
+        for (const dd of a) {
+          const ex = x - dd[0], ey = y - dd[1], rr = r + dd[2] + 2;
+          if (ex * ex + ey * ey < rr * rr) return false;
+        }
+      }
+    }
+    return true;
+  };
+  // Each maker picks its size, checks it is clear, and returns whether it placed;
+  // the placers only count successful placements.
+  const mkRock = (x, y) => {
+    const r = 4 + rng() * 9;
+    if (!clearAt(x, y, r)) return false;
+    rocks.push([x, y, r, Math.floor(rng() * PALETTE.rocks.length)]); addDetail(x, y, r); return true;
+  };
+  const mkBush = (x, y) => {
+    const r = 5 + rng() * 9;
+    if (!clearAt(x, y, r)) return false;
+    bushes.push([x, y, r, Math.floor(rng() * PALETTE.bushes.length)]); addDetail(x, y, r); return true;
+  };
+  const mkFlower = (x, y) => {
+    const r = 3;
+    if (!clearAt(x, y, r)) return false;
+    flowers.push([x, y, Math.floor(rng() * PALETTE.flowers.length)]); addDetail(x, y, r); return true;
+  };
   const nRock = Math.round(TRACK_LEN / 60 * fl.rock);
   const nBush = Math.round(TRACK_LEN / 55 * fl.bush);
   const nFlower = Math.round(TRACK_LEN / 30 * fl.flower);

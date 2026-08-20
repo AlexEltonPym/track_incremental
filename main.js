@@ -21,7 +21,7 @@ import {
 import { botField } from "./bots.js?v=9";
 // Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
 // per track from geometry + a seeded PRNG and cached. Rendered under the road.
-import { getDecor, PALETTE } from "./decor.js?v=8";
+import { getDecor, PALETTE } from "./decor.js?v=9";
 
 // ---------------------------------------------------------------- constants
 
@@ -795,6 +795,27 @@ function drawCar(x, y, angle, alpha, bodyColor) {
 // only items within the visible radius are touched, so a track with hundreds of
 // trees (Cape Cruise) still costs only what is on screen. No allocation here —
 // the decoration arrays are precomputed and cached in decor.js.
+// Trace a SMOOTH closed curve through a ring of points: each point is a
+// quadratic control point and the curve passes through the edge midpoints, so a
+// coarse jittered polygon (a lake outline) renders as an organic blob with no
+// visible straight edges. Caller sets fill/stroke and calls beginPath first.
+function smoothClosedPath(ctx, pts) {
+  const n = pts.length;
+  if (n < 3) {
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < n; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    return;
+  }
+  const mx = (a, b) => (a[0] + b[0]) / 2, my = (a, b) => (a[1] + b[1]) / 2;
+  ctx.moveTo(mx(pts[n - 1], pts[0]), my(pts[n - 1], pts[0]));
+  for (let i = 0; i < n; i++) {
+    const cur = pts[i], next = pts[(i + 1) % n];
+    ctx.quadraticCurveTo(cur[0], cur[1], mx(cur, next), my(cur, next));
+  }
+  ctx.closePath();
+}
+
 function drawDecor() {
   const decor = getDecor(T.TRACK);
   // Visible radius: half the canvas diagonal in WORLD px (the camera rotates,
@@ -810,15 +831,11 @@ function drawDecor() {
   for (const L of decor.lakes) {
     if (!vis(L.cx, L.cy, L.r)) continue;
     ctx.beginPath();
-    ctx.moveTo(L.shore[0][0], L.shore[0][1]);
-    for (let i = 1; i < L.shore.length; i++) ctx.lineTo(L.shore[i][0], L.shore[i][1]);
-    ctx.closePath();
+    smoothClosedPath(ctx, L.shore);
     ctx.fillStyle = PALETTE.shore;
     ctx.fill();
     ctx.beginPath();
-    ctx.moveTo(L.poly[0][0], L.poly[0][1]);
-    for (let i = 1; i < L.poly.length; i++) ctx.lineTo(L.poly[i][0], L.poly[i][1]);
-    ctx.closePath();
+    smoothClosedPath(ctx, L.poly);
     ctx.fillStyle = PALETTE.water;
     ctx.fill();
     ctx.strokeStyle = PALETTE.waterEdge;
@@ -826,9 +843,7 @@ function drawDecor() {
     ctx.stroke();
     if (L.island) {
       ctx.beginPath();
-      ctx.moveTo(L.island[0][0], L.island[0][1]);
-      for (let i = 1; i < L.island.length; i++) ctx.lineTo(L.island[i][0], L.island[i][1]);
-      ctx.closePath();
+      smoothClosedPath(ctx, L.island);
       ctx.fillStyle = PALETTE.island;
       ctx.fill();
     }
