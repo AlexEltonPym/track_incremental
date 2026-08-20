@@ -862,9 +862,12 @@ function sampleSpeed(samples, i) {
 
 // A replayed car's render pose, interpolated between the previous and current
 // sample by interpAlpha — so ghosts and bots are as smooth as the player car.
+// At index 0 there is no valid previous sample (the wrap seam jumps from the
+// recording's end back to the grid), so draw it exactly — otherwise a parked
+// bot on the grid flickers between the grid and the finish line every frame.
 function interpSample(samples, i) {
-  const n = samples.length;
-  const b = samples[(i - 1 + n) % n], a = samples[i];
+  if (i <= 0 || interpAlpha === 0) return samples[i];
+  const b = samples[i - 1], a = samples[i];
   return [b[0] + (a[0] - b[0]) * interpAlpha, b[1] + (a[1] - b[1]) * interpAlpha,
     b[2] + angDiff(a[2], b[2]) * interpAlpha];
 }
