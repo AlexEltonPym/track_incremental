@@ -270,6 +270,29 @@ function build(track) {
     trees.push([x, y, r, Math.floor(rng() * PALETTE.trees.length)]);
   }
 
+  // Spatial hash of the trees so ground detail (rocks / bushes / flowers) can be
+  // kept OFF the canopies — a flower drawn on top of a tree reads as a bug.
+  const TCELL = 64;
+  const treeGrid = new Map();
+  for (const t of trees) {
+    const k = Math.floor(t[0] / TCELL) + "," + Math.floor(t[1] / TCELL);
+    let a = treeGrid.get(k); if (!a) { a = []; treeGrid.set(k, a); } a.push(t);
+  }
+  const nearTree = (x, y, pad) => {
+    const cx = Math.floor(x / TCELL), cy = Math.floor(y / TCELL);
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const a = treeGrid.get(gx + "," + gy);
+        if (!a) continue;
+        for (const t of a) {
+          const dx = x - t[0], dy = y - t[1], rr = t[2] + pad;
+          if (dx * dx + dy * dy < rr * rr) return true;
+        }
+      }
+    }
+    return false;
+  };
+
   // ---- rocks / bushes / flowers: in the GRASS CORRIDOR and the clearings,
   // where they read naturally against open grass rather than under canopy.
   // Both placers are BOUNDED (a centerline walk into the corridor, or a disc
@@ -289,7 +312,7 @@ function build(track) {
       const x = p[0] - ty * side * o, y = p[1] + tx * side * o;
       const d = dist(x, y);
       if (d <= roadClear || d >= inner) continue;   // stay in the grass corridor
-      if (inLake(x, y, 4)) continue;
+      if (inLake(x, y, 4) || nearTree(x, y, 3)) continue;
       make(x, y); made++;
     }
   };
@@ -303,7 +326,7 @@ function build(track) {
       const x = c.cx + Math.cos(ang) * rad, y = c.cy + Math.sin(ang) * rad;
       if (!inClearing(x, y)) continue;
       const d = dist(x, y);
-      if (d <= roadClear || inLake(x, y, 4)) continue;
+      if (d <= roadClear || inLake(x, y, 4) || nearTree(x, y, 3)) continue;
       make(x, y); made++;
     }
   };
