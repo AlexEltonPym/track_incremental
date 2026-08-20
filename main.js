@@ -816,6 +816,34 @@ function smoothClosedPath(ctx, pts) {
   ctx.closePath();
 }
 
+// A replayed car's speed from its recording: distance between the current and
+// previous sample per tick (wrap-safe).
+function sampleSpeed(samples, i) {
+  const n = samples.length;
+  const a = samples[i], b = samples[(i - 1 + n) % n];
+  return Math.hypot(a[0] - b[0], a[1] - b[1]) / TICK;
+}
+
+// A small boost flame behind a GHOST, inferred from motion: a car moving faster
+// than top speed is mid-boost (like the player's own flame, just fainter). Tier
+// colour from how far over top speed it is. Drawn before the ghost body so the
+// car sits over the flame root.
+function ghostFlame(x, y, angle, speed, alpha) {
+  const over = speed / params.topSpeed;
+  if (over < 1.06) return;                       // only when clearly boosting
+  const tier2 = over > 1.30;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  const flick = 1 + 0.3 * Math.sin(state.totalTicks * 1.1);
+  const len = (tier2 ? 11 : 7) * flick;          // a touch smaller than the player's
+  ctx.fillStyle = tier2 ? "#ff9630" : "#549eff";
+  ctx.fillRect(-11 - len, -3.2, len, 2.8);
+  ctx.fillRect(-11 - len, 0.4, len, 2.8);
+  ctx.restore();
+}
+
 function drawDecor() {
   const decor = getDecor(T.TRACK);
   // Visible radius: half the canvas diagonal in WORLD px (the camera rotates,
@@ -1014,6 +1042,7 @@ function renderWorld() {
   if (state.showBotGhosts) {
     for (const g of botGhosts) {
       const s = g.samples[g.idx];
+      ghostFlame(s[0], s[1], s[2], sampleSpeed(g.samples, g.idx), 0.5);
       drawCar(s[0], s[1], s[2], 0.24, g.body);
       ctx.save();
       ctx.translate(s[0], s[1]);
@@ -1036,6 +1065,7 @@ function renderWorld() {
       const rec = ts.rankedLaps[k];
       const h = Math.min(ts.ghostHeads[k] ?? 0, rec.samples.length - 1);
       const g = rec.samples[h];
+      ghostFlame(g[0], g[1], g[2], sampleSpeed(rec.samples, h), k === 0 ? 0.55 : 0.45);
       drawCar(g[0], g[1], g[2], k === 0 ? 0.38 : 0.26, k === 0 ? "#cfe8ff" : "#9fd0f5");
     }
   }
