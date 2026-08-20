@@ -18,8 +18,8 @@
 // touches no game state. Nothing here is imported by main.js or the shipped
 // harness.
 
-import { TICK, SURFACE, carParams, createCarState, stepCar } from "./physics.js?v=12";
-import * as T from "./track.js?v=12";
+import { TICK, SURFACE, carParams, createCarState, stepCar } from "./physics.js?v=13";
+import * as T from "./track.js?v=13";
 
 // The car's body half-width (matches bots.js CAR_HALF_W): the racing line must
 // keep the CAR on the road, not merely its centre, so the usable half-width is

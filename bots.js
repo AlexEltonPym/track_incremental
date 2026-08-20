@@ -15,8 +15,8 @@
 // ?v= cache-busting: keep in lockstep with main.js's imports (see the note
 // there) so a caching server can't serve a stale bots.js against a fresh
 // track.js — the split that left the F1 grid computed but unused.
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=12";
-import * as T from "./track.js?v=12";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=13";
+import * as T from "./track.js?v=13";
 // The racing-line family (LINE + ACE) is a DIFFERENT driver architecture from
 // the reactive pure-pursuit bots above: an offline min-curvature racing line +
 // friction-limited speed profile, driven by a lookahead follower (racingline.mjs).

@@ -561,6 +561,23 @@ buys two things a baked file cannot:
   arc-length fractions - including PRO+'s drift zones, which are derived from
   track curvature (below).
 
+**The sim runs in a Web Worker, so buying an upgrade never freezes the frame.**
+Re-simulating the whole seven-bot field on a new car spec is ~0.6-1.5 s of pure
+number-crunching, and running it inline stalled the render thread the instant
+you bought a driving upgrade. It now runs off-thread in a module worker
+(`botworker.js`): `refreshBotField()` posts the job and returns in **under a
+millisecond**, the current bots keep looping at the old pace, and the fresh
+field swaps in a moment later when the worker replies (their HUD times update
+then). Only the **first** field, at load, is computed synchronously so the grid
+is never empty at start. A small main-thread cache keyed on `(track + car spec)`
+applies an already-computed field **instantly** with no round-trip, so a re-grid
+or a re-visit to a track/spec you've already seen is free; rapid buying sprees
+are debounced (~200 ms) into a single worker job, and stale replies (superseded
+by a newer upgrade) are discarded. If the `Worker` API is unavailable or the
+worker fails to load, it falls back to the old synchronous path so the field
+always refreshes (just with the old stall). The worker's field is bit-identical
+to the synchronous one — same seeds, same track, same samples.
+
 Times on the stock car (lap 1 standing / lap 2 / lap 3 - total, best flying):
 
 | tier | lap 1 | lap 2 | lap 3 | race | best flying |
@@ -996,6 +1013,12 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   launch spreads the field — memoised on (car spec + `TRACK_SIGNATURE`) in an
   8-slot LRU so re-grids are free, only an upgrade purchase re-runs the physics,
   and flipping back to a circuit you were just on is instant.
+- `botworker.js` — a tiny `{type:"module"}` **Web Worker** that imports `bots.js`
+  (at the same `?v` token as the main thread) and runs `fullBotField()` off the
+  render thread. `main.js` posts `{trackId, params, opts}`, the worker
+  `setTrack`s and simulates, and posts back the plain field data (samples, lap
+  ticks, colours) — so buying a driving upgrade re-simulates the whole seven-bot
+  field *without freezing the frame*. See *[The bot ghosts](#the-bot-ghosts-an-endless-pace-field-simulated-live)*.
 - `decor.js` — **purely cosmetic** world scenery: a dense **forest band** hugging
   a **grass corridor** around the track, with clearings, lakes, rocks, bushes and
   flowers. Generates a track's decoration from its centerline + bounding box +

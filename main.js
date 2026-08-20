@@ -5,7 +5,7 @@
 import {
   TICK, SURFACE, carParams, createCarState, stepCar,
   UPGRADE_DEFS, upgradeCost, insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "./physics.js?v=12";
+} from "./physics.js?v=13";
 // track.js exports the ACTIVE track's geometry as ES module live bindings, so
 // these names follow setTrack() with no re-import and no plumbing.
 // NOTE: the ?v= query on every internal import is deliberate cache-busting for
@@ -13,15 +13,15 @@ import {
 // will otherwise serve a STALE module for a bare URL like "./bots.js" while a
 // sibling ("./track.js") is fresh — a split that once left the F1 grid slots
 // computed but unused. Bump this token (and SAVE_VERSION) together on release.
-import * as T from "./track.js?v=12";
+import * as T from "./track.js?v=13";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
   TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
-} from "./track.js?v=12";
-import { fullBotField } from "./bots.js?v=12";
+} from "./track.js?v=13";
+import { fullBotField, fieldSignature } from "./bots.js?v=13";
 // Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
 // per track from geometry + a seeded PRNG and cached. Rendered under the road.
-import { getDecor, PALETTE } from "./decor.js?v=12";
+import { getDecor, PALETTE } from "./decor.js?v=13";
 
 // ---------------------------------------------------------------- constants
 
@@ -46,6 +46,9 @@ function maxLapTicks() {
 // Countdown length: 3 s of "3 / 2 / 1", one second each, then GO.
 const COUNTDOWN_TICKS = 3 * 60;
 const GO_FLASH_TICKS = 45;
+// When a re-simulated bot field swaps in (after an upgrade), crossfade each bot
+// from its old recording to the new one over this many ticks instead of popping.
+const FADE_TICKS = 40;
 
 // What YOUR OWN valid lap pays, as a multiple of what one loop of an earning
 // ghost pays for a lap of the same length. Deliberately more than 1: the ghost
@@ -229,16 +232,62 @@ let lastSimMs = 0;      // ms the last (uncached) field simulation took
 // false to restore the staggered grid — the harness always uses the real grid.
 const STACKED_START = true;
 
-function refreshBotField() {
-  const field = fullBotField(params, { stacked: STACKED_START });
-  if (field.simMs) lastSimMs = field.simMs;
-  // Keep playback position across a re-simulation so buying an upgrade
-  // mid-race does not teleport the field back to the grid.
-  const keep = state.phase === "racing" ? botGhosts.map(g => g.idx) : null;
+// ---- the bot-field refresh, off the main thread ----
+//
+// Simulating the seven bots' three-lap races is ~0.6-1.5 s of number crunching
+// (see botworker.js); running it inline froze the frame the instant you bought
+// a driving upgrade. So refreshBotField() no longer BLOCKS: it computes the
+// field's signature, and either
+//   * serves it INSTANTLY from a small main-thread cache (a re-grid, or a spec
+//     /track already computed — the "R re-grid is free" property), or
+//   * posts the job to a Web Worker and RETURNS, leaving the current bots
+//     looping until the reply lands ~1 s later and swaps in the new field.
+// A track switch has no valid current bots (they'd draw on the new geometry),
+// so it clears the grid until the reply. The first field (on load) is done
+// synchronously so the grid is never empty at start. If the Worker API is
+// missing or the worker errors, it falls back to the old synchronous path.
+
+const WORKER_DEBOUNCE_MS = 200;      // coalesce a fast buying spree into one job
+const FIELD_MAIN_CACHE_MAX = 12;     // recent fields by signature (main thread)
+const fieldMainCache = new Map();    // signature -> field (array of plain bot entries)
+let botWorker = null;                // the module worker (lazy, may stay null)
+let workerFailed = false;            // Worker missing or errored -> sync fallback
+let workerReqId = 0;                 // monotonic request id
+let workerLatestReqId = 0;           // only this id's reply is applied (rest stale)
+let botGhostsTrackId = null;         // track the currently-shown botGhosts belong to
+let refreshDebounceTimer = null;     // pending debounce timer
+let pendingReq = null;               // the latest request awaiting the debounce
+
+// The cache key for the current car + track: fieldSignature already folds in
+// the track signature and the full driving spec; the trackId and stacked flag
+// complete it (a switch back to an identical-geometry-signature track is still
+// keyed by id, and stacked changes the grid).
+function fieldKey() {
+  return state.currentTrack + "|" + fieldSignature(params) +
+    (STACKED_START ? "|stacked" : "");
+}
+
+function cacheField(key, field) {
+  fieldMainCache.delete(key);
+  fieldMainCache.set(key, field);
+  if (fieldMainCache.size > FIELD_MAIN_CACHE_MAX) {
+    fieldMainCache.delete(fieldMainCache.keys().next().value);
+  }
+}
+
+// Map a field (plain bot entries, from the worker OR the sync path) into the
+// live botGhosts, preserving each ghost's playhead idx across a same-track
+// re-sim so buying an upgrade mid-race doesn't teleport the field back to the
+// grid. When botGhosts is empty (a fresh track), keep[i] is undefined -> idx 0.
+function applyField(field, trackId) {
+  if (field.simMs != null) lastSimMs = field.simMs;
+  const prev = botGhosts;
+  const sameTrack = trackId === botGhostsTrackId;
+  const keep = state.phase === "racing" ? prev.map(g => g.idx) : null;
   botGhosts = field.map((g, i) => {
     const loopStart = g.lapTicks[0];
     const loopLen = g.lapTicks[1] ?? Math.max(1, g.samples.length - 1 - loopStart);
-    return {
+    const ng = {
       key: g.key, label: g.label, short: g.short, body: g.body, text: g.text,
       samples: g.samples,
       standing: g.lapTicks[0],
@@ -246,9 +295,122 @@ function refreshBotField() {
       loopStart, loopLen,
       idx: keep ? Math.min(keep[i] ?? 0, loopStart + loopLen - 1) : 0,
     };
+    // Mid-race upgrade re-sim: keep the old recording playing and crossfade the
+    // drawn pose toward the new one, so the bot slides to its new line rather
+    // than teleporting. (A track switch or fresh load has no old pose to blend.)
+    const old = prev[i];
+    if (keep && sameTrack && old && old.key === g.key) {
+      ng.fade = { samples: old.samples, idx: old.idx,
+        loopStart: old.loopStart, loopLen: old.loopLen, t: 0 };
+    }
+    return ng;
   });
+  botGhostsTrackId = trackId;
   updateRefLaps();
+}
+
+// Current drawn pose [x, y, angle] of a bot ghost. During the post-upgrade
+// crossfade it blends the old recording into the new one; `interp` renders the
+// samples interpolated between physics ticks (screen) vs. raw (minimap).
+function botPose(g, interp) {
+  const cur = interp ? interpSample(g.samples, g.idx) : g.samples[g.idx];
+  if (!g.fade) return cur;
+  const old = interp ? interpSample(g.fade.samples, g.fade.idx)
+                     : g.fade.samples[g.fade.idx];
+  const b = g.fade.t / FADE_TICKS;                 // 0 -> old, 1 -> new
+  return [ old[0] + (cur[0] - old[0]) * b,
+           old[1] + (cur[1] - old[1]) * b,
+           old[2] + angDiff(cur[2], old[2]) * b ];
+}
+
+// Construct the worker lazily on first use. Returns false (once) if the Worker
+// API is unavailable or construction throws, so the caller falls back to sync.
+function ensureWorker() {
+  if (botWorker) return true;
+  if (workerFailed || typeof Worker === "undefined") return false;
+  try {
+    // URL relative to THIS module, so it resolves the same locally and on
+    // GitHub Pages; the ?v token matches the worker's own bots.js import.
+    botWorker = new Worker(new URL("./botworker.js?v=13", import.meta.url),
+      { type: "module" });
+    botWorker.onmessage = onWorkerMessage;
+    botWorker.onerror = (err) => {
+      // A module worker that fails to import (e.g. a stale/absent ?v) errors
+      // here, asynchronously. Degrade to the synchronous path for good and
+      // refresh the field right now so it is never left un-updated.
+      console.warn("botworker error; falling back to synchronous sim", err.message || err);
+      workerFailed = true;
+      botWorker = null;
+      refreshBotFieldSync();
+    };
+    return true;
+  } catch (err) {
+    console.warn("botworker construction failed; using synchronous sim", err);
+    workerFailed = true;
+    return false;
+  }
+}
+
+function onWorkerMessage(e) {
+  const { reqId, key, trackId, field, simMs } = e.data;
+  field.simMs = simMs;
+  cacheField(key, field);                 // cache even a stale reply: future hit
+  if (reqId !== workerLatestReqId) return; // superseded by a newer request
+  applyField(field, trackId);
+}
+
+// The SYNCHRONOUS path: the original in-line simulation. Used for the very first
+// field on load, and as the fallback when no worker is available. Blocks the
+// frame (the old stall) but guarantees a populated field.
+function refreshBotFieldSync() {
+  const trackId = state.currentTrack;
+  const key = fieldKey();
+  const field = fullBotField(params, { stacked: STACKED_START });
+  cacheField(key, field);
+  applyField(field, trackId);
   return field;
+}
+
+// The ASYNC refresh used everywhere after startup (upgrades, track switches).
+function refreshBotField() {
+  const trackId = state.currentTrack;
+  const key = fieldKey();
+
+  // Cache hit: apply instantly, no round-trip. Supersede any in-flight/pending
+  // request so a late reply for the old spec can't clobber this.
+  const cached = fieldMainCache.get(key);
+  if (cached) {
+    fieldMainCache.delete(key); fieldMainCache.set(key, cached);  // LRU bump
+    workerLatestReqId = ++workerReqId;
+    pendingReq = null;
+    applyField(cached, trackId);
+    return;
+  }
+
+  // No worker (unsupported or previously failed): synchronous fallback.
+  if (!ensureWorker()) { refreshBotFieldSync(); return; }
+
+  // A TRACK SWITCH has no valid current bots — the old track's recordings would
+  // draw on the new geometry — so clear the grid until the reply arrives. An
+  // upgrade is same-track: keep the current bots looping at the old pace.
+  if (trackId !== botGhostsTrackId) {
+    botGhosts = [];
+    botGhostsTrackId = trackId;   // claim it so a follow-up isn't re-cleared
+    updateRefLaps();
+  }
+
+  // Debounced post: a buying spree bumps reqId each call but only the last is
+  // actually sent to the worker.
+  const reqId = ++workerReqId;
+  workerLatestReqId = reqId;
+  pendingReq = { reqId, key, trackId, params, opts: { stacked: STACKED_START } };
+  if (!refreshDebounceTimer) {
+    refreshDebounceTimer = setTimeout(() => {
+      refreshDebounceTimer = null;
+      const req = pendingReq; pendingReq = null;
+      if (req && botWorker) botWorker.postMessage(req);
+    }, WORKER_DEBOUNCE_MS);
+  }
 }
 
 function updateRefLaps() {
@@ -715,8 +877,15 @@ function physicsStep() {
     g.idx++;
     if (g.idx >= g.loopStart + g.loopLen) { g.idx = g.loopStart; g._rear = null; }
     const cur = g.samples[g.idx];
+    // Advance the fading old recording in lockstep and count down the blend.
+    if (g.fade) {
+      g.fade.idx++;
+      if (g.fade.idx >= g.fade.loopStart + g.fade.loopLen) g.fade.idx = g.fade.loopStart;
+      if (++g.fade.t >= FADE_TICKS) g.fade = null;
+    }
     // _rear was nulled on the wrap, so no rubber is drawn across the loop seam.
-    driftMarkFor(g, "_rear", cur[0], cur[1], cur[2], prev[0], prev[1]);
+    // Skip marks mid-crossfade — the car is between lines, not on the new one.
+    if (!g.fade) driftMarkFor(g, "_rear", cur[0], cur[1], cur[2], prev[0], prev[1]);
   }
 }
 
@@ -1092,7 +1261,7 @@ function renderWorld() {
   // small floating label counter-rotated to stay upright under the camera.
   if (state.showBotGhosts) {
     for (const g of botGhosts) {
-      const s = interpSample(g.samples, g.idx);
+      const s = botPose(g, true);
       ghostFlame(s[0], s[1], s[2], sampleSpeed(g.samples, g.idx), 0.5);
       drawCar(s[0], s[1], s[2], 0.24, g.body);
       ctx.save();
@@ -1206,7 +1375,7 @@ function renderMinimap() {
   // Bot reference ghost dots.
   if (state.showBotGhosts) {
     for (const g of botGhosts) {
-      const s = g.samples[g.idx];
+      const s = botPose(g, false);
       const bp = mmPoint(s[0], s[1]);
       ctx.fillStyle = g.body;
       ctx.globalAlpha = 0.85;
@@ -1449,12 +1618,12 @@ function buyUpgrade(u) {
     state.drivingLevels[u.id]++;
     params = carParams(state.drivingLevels);
     // The bots drive your car, so a DRIVING spec change re-plans and
-    // re-simulates their whole race (a few tens of ms) and their HUD times move.
-    const before = botGhosts.map(g => g.bestFlying);
+    // re-simulates their whole race. That now runs in a Web Worker
+    // (refreshBotField returns immediately, no frame stall): the current bots
+    // keep looping and their HUD times update a moment later when the worker
+    // replies. A cache hit (a spec already computed) applies instantly.
     refreshBotField();
-    const moved = botGhosts.some((g, i) => g.bestFlying !== before[i]);
-    flashMsg(`${u.name} → Lv ${state.drivingLevels[u.id]}` +
-      (moved ? " — bots re-simulated on the new spec." : ""));
+    flashMsg(`${u.name} → Lv ${state.drivingLevels[u.id]} — bots re-simulating…`);
   } else if (u.id === "payout") {
     here().lapPayoutLvl++;
     flashMsg(`${u.name} → Lv ${here().lapPayoutLvl} (this track)`);
@@ -1575,8 +1744,10 @@ params = carParams(state.drivingLevels);
 buildTrackSelector();
 buildUpgradePanel();
 // Simulate the reference field for the loaded car before the first frame, so
-// the grid is populated and the HUD shows real bot times immediately.
-refreshBotField();
+// the grid is populated and the HUD shows real bot times immediately. This ONE
+// field is synchronous (a one-time cost at load); every later refresh — upgrades
+// and track switches — goes through the Web Worker so the frame never stalls.
+refreshBotFieldSync();
 el("goBtn").addEventListener("click", startCountdown);
 showMenu();
 window.addEventListener("beforeunload", save);
@@ -1595,6 +1766,12 @@ window.__game = {
   get decor() { return getDecor(T.TRACK); },
   get simMs() { return lastSimMs; },
   refreshBotField,
+  refreshBotFieldSync,
+  // Worker introspection for verification: is the sim off-thread, how many
+  // fields are cached on the main thread, and force the sync fallback.
+  get workerActive() { return !!botWorker && !workerFailed; },
+  get fieldCacheSize() { return fieldMainCache.size; },
+  forceSyncFallback() { workerFailed = true; if (botWorker) { botWorker.terminate(); botWorker = null; } },
   get params() { return params; },
   // Manually advance the game when rAF is throttled (headless/testing).
   step(n = 1) {

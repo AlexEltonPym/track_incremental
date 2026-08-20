@@ -21,7 +21,7 @@
 // It imports track.js at the SAME ?v=11 token every other module uses — a
 // different token would split track.js into a second instance and break the
 // per-track live bindings.
-import * as T from "./track.js?v=12";
+import * as T from "./track.js?v=13";
 
 // ---------------------------------------------------------------- palette
 //
