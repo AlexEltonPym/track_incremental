@@ -305,10 +305,6 @@ function driftMarkFor(store, key, x, y, angle, prevX, prevY) {
 let wasDrifting = false;
 let boostFlash = 0;     // ticks of "BOOST!" text remaining
 let boostFlashTier = 1;
-// After R re-grids the field, the bots hold on the grid until you next cross the
-// start line, so the re-race launches together. Cleared at GO and at that line
-// crossing. (The earning ghosts are separate and keep looping regardless.)
-let botsHeld = false;
 // F1 GRID START. The player sits on POLE (START_POS) and the seven bots on grid
 // slots 1..7 (NOVICE, MID, PRO, PRO+, PRO++, then LINE and ACE at the back),
 // each further back along the start straight — their recordings begin at v=0 on
@@ -339,7 +335,6 @@ function resetCar() {
   ghostMarks.length = 0;
   earnRear.length = 0;
   for (const g of botGhosts) { g.idx = 0; g._rear = null; }   // bots back on the grid
-  botsHeld = false;         // the countdown launches them at GO
   // Teleport = snap the camera too; smoothing a reset feels like a swoop.
   camera.x = START_POS.x; camera.y = START_POS.y; camera.angle = START_ANGLE;
   camera.zoom = CAM_ZOOM_SLOW;
@@ -362,10 +357,9 @@ function resetToLine() {
   lastRear = null;
   wasDrifting = false;
   boostFlash = 0;
-  // Re-grid the racing bots too (but NOT the earning ghosts) and hold them until
-  // you cross the line again, so the re-race launches together.
+  // Re-grid the racing bots too (but NOT the earning ghosts); they relaunch
+  // immediately from the grid on R.
   for (const g of botGhosts) { g.idx = 0; g._rear = null; }
-  botsHeld = true;
   camera.x = START_POS.x; camera.y = START_POS.y; camera.angle = START_ANGLE;
   camera.zoom = CAM_ZOOM_SLOW;
   camera.kickLat = 0; camera.kickRot = 0; camera.driftBias = 0; camera.pulse = 0;
@@ -699,14 +693,12 @@ function physicsStep() {
   }
   if (ev.started) {
     state.lapRec = [[c.x, c.y, c.angle]];
-    botsHeld = false;             // crossing the line launches a held re-grid
   }
 
   // ---- bot reference ghosts: standing launch once, then loop the flying lap ----
   // No income — pure pace reference. They ran from their grid slots, so the
   // standing samples (0..loopStart) spread the F1 grid on launch; after that
   // each loops its flying lap (loopStart..loopStart+loopLen) forever.
-  if (botsHeld) return;            // held on the grid after R until you cross the line
   for (const g of botGhosts) {
     const prev = g.samples[g.idx];
     g.idx++;
