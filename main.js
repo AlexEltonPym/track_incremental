@@ -5,7 +5,7 @@
 import {
   TICK, SURFACE, carParams, createCarState, stepCar,
   UPGRADE_DEFS, upgradeCost, insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "./physics.js?v=9";
+} from "./physics.js?v=10";
 // track.js exports the ACTIVE track's geometry as ES module live bindings, so
 // these names follow setTrack() with no re-import and no plumbing.
 // NOTE: the ?v= query on every internal import is deliberate cache-busting for
@@ -13,15 +13,15 @@ import {
 // will otherwise serve a STALE module for a bare URL like "./bots.js" while a
 // sibling ("./track.js") is fresh — a split that once left the F1 grid slots
 // computed but unused. Bump this token (and SAVE_VERSION) together on release.
-import * as T from "./track.js?v=9";
+import * as T from "./track.js?v=10";
 import {
   ROAD_HALF, CENTER, N, CHECKPOINTS, START_GATE, START_POS, START_ANGLE,
   TRACKS, DEFAULT_TRACK, surfaceAt, createLap, advanceLap,
-} from "./track.js?v=9";
-import { botField } from "./bots.js?v=9";
+} from "./track.js?v=10";
+import { botField } from "./bots.js?v=10";
 // Purely cosmetic world scenery (lakes/forests/rocks/bushes/flowers), generated
 // per track from geometry + a seeded PRNG and cached. Rendered under the road.
-import { getDecor, PALETTE } from "./decor.js?v=9";
+import { getDecor, PALETTE } from "./decor.js?v=10";
 
 // ---------------------------------------------------------------- constants
 
@@ -238,8 +238,8 @@ function refreshBotField() {
 function updateRefLaps() {
   // Displayed times are each bot's best FLYING lap of its 3-lap race — the
   // like-for-like comparison against your own flying laps (their lap 1 is
-  // ~1.2-1.9 s slower because it starts from rest on the grid). Four tiers
-  // is too wide for one panel row: wrap to two color-coded lines.
+  // ~1.2-1.9 s slower because it starts from rest on the grid). Five tiers
+  // is too wide for one panel row: wrap two per color-coded line (three lines).
   const bits = botGhosts.map(g =>
     `<span style="color:${g.text}" title="${g.label}: lap 1 (standing) ` +
     `${(g.standing / 60).toFixed(2)}s, best flying ${(g.bestFlying / 60).toFixed(2)}s">` +
@@ -285,8 +285,8 @@ function driftMarkFor(store, key, x, y, angle, prevX, prevY) {
 let wasDrifting = false;
 let boostFlash = 0;     // ticks of "BOOST!" text remaining
 let boostFlashTier = 1;
-// F1 GRID START. The player sits on POLE (START_POS) and the four bots on grid
-// slots 1..4 (NOVICE, MID, PRO, PRO+), each further back along the start
+// F1 GRID START. The player sits on POLE (START_POS) and the five bots on grid
+// slots 1..5 (NOVICE, MID, PRO, PRO+, PRO++), each further back along the start
 // straight — their recordings begin at v=0 on their own slot, so the launch
 // spreads the field into an F1 stagger. Nobody moves until GO: the START menu's
 // countdown reaches zero, `phase` becomes "racing", and everyone launches

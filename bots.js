@@ -15,8 +15,8 @@
 // ?v= cache-busting: keep in lockstep with main.js's imports (see the note
 // there) so a caching server can't serve a stale bots.js against a fresh
 // track.js — the split that left the F1 grid computed but unused.
-import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=9";
-import * as T from "./track.js?v=9";
+import { TICK, G_PX, SURFACE, createCarState, stepCar, slipAngle } from "./physics.js?v=10";
+import * as T from "./track.js?v=10";
 
 // ---------------------------------------------------------------- PRNG
 
@@ -128,6 +128,48 @@ export const SKILLS = {
     holdThrottle: 1.0,
     drift: "auto",
     seed: 5005,
+  },
+  // "PRO++": the fastest bot on the grid, and the demonstration that the FULL
+  // boost (tier 2 / orange) is real. Same pursuit + drift controller as PRO+,
+  // pushed harder on every axis that the on-road filter still tolerates: it
+  // carries more corner speed (latBudget 0.98 vs 0.91), brakes later
+  // (brakeMargin 3 vs 6) and runs a tighter racing line, so it beats PRO+ on
+  // pure aggression even where tier 2 does not pay. AND it RACES a forced
+  // tier-2 drift plan (tryTier2) as an extra variant: where a corner can hold
+  // the slide long enough to bank the orange charge AND the exit is long enough
+  // to spend it (Ember's two loops onto their long straights), raceBest keeps
+  // the tier-2 line; where it cannot (Longshore/Lantern have no chargeable
+  // corner at all, so there is nothing to escalate), it falls back to the
+  // fastest tier-1 / clean line. The gain is therefore honest per track — see
+  // the README's per-track tier-2 verdict.
+  // It keeps PRO+'s proven-safe cornering BASE (same latBudget / brakeMargin /
+  // look-ahead, so its drift line stays on the road across the whole upgrade
+  // space, exactly as PRO+'s does) and adds only what buys time without ever
+  // running wide:
+  //   * tryTier2 — race a forced tier-2 plan and keep it where it pays (Ember);
+  //   * steerGain 1.6 (vs 1.45) — cuts a little more line, which is the ONLY
+  //     lever on the top-speed-bound speedway (a few ms) and helps everywhere;
+  //   * turnUse 0.95 (vs the default 0.85) — banks more of the yaw-rate ceiling,
+  //     the big lever on the STEERING-limited coil, where PRO+ leaves ~28 px of
+  //     road unused (worth ~0.8 s there).
+  // Deliberately does NOT touch lineWiden / latBudget / brakeMargin: pushing
+  // those carried Ember's drift off the road on an upgraded car, which both
+  // broke the on-road filter and — because the off-road slide was then rejected
+  // — cost it the boost and the ladder. Aggression only where the road allows.
+  proplusplus: {
+    lookAheadBase: 85,
+    lookAheadVel: 0.215,
+    decisionTicks: 1,
+    steerNoise: 0.0,
+    steerGain: 1.6,       // cuts more line than PRO+'s 1.45 (the only speedway lever)
+    latBudget: 0.91,      // same corner-entry grip budget as PRO+ (kept safe)
+    turnUse: 0.95,        // banks more yaw ceiling: the coil's big lever
+    throttleMax: 1.0,
+    brakeMargin: 6,       // same as PRO+ — its drift entry is tuned around this
+    holdThrottle: 1.0,
+    drift: "auto",
+    tryTier2: true,       // also race a forced tier-2 plan; keep it if it pays
+    seed: 6006,
   },
 };
 
@@ -404,8 +446,19 @@ export function deriveDriftZones(params, skill, tuning) {
         // tier-2 boost to a tier-1 one and cost it half a second: an upgrade
         // that made it slower, and the last monotonicity failure standing.
         const zoneSecs = c.len / vZone;
-        const targetCharge = zoneSecs >= params.boostTier2 * t.chargeLenSafety
+        // Tier selection. By default (targetTier unset) it is AUTOMATIC: a
+        // corner long enough IN SECONDS to bank tier 2 with margin targets it,
+        // else tier 1. PRO++ overrides this to explicitly try a tier-2 plan
+        // (targetTier: 2) as one of its raced variants — see planVariants — and
+        // raceBest keeps it only if the bigger boost actually paid off on the
+        // exit that follows. Forcing tier 2 on a corner that cannot physically
+        // bank it degrades gracefully: the driver holds the slide, the charge
+        // stalls at tier 1, the decay-release fires tier 1, and that (slower,
+        // more line-costly) variant simply loses the race to the tier-1 plan.
+        const autoTier = zoneSecs >= params.boostTier2 * t.chargeLenSafety
           ? params.boostTier2 : params.boostTier1;
+        const targetCharge = t.targetTier === 2 ? params.boostTier2
+          : t.targetTier === 1 ? params.boostTier1 : autoTier;
         const zoneLen = Math.min(c.len, targetCharge * vZone * t.zoneLenTiers);
         const startArc = c.startArc + (c.len - zoneLen) * t.zonePlace;
         zones.push({
@@ -725,8 +778,17 @@ export function makeBot(skill, params) {
       // linearly, so on an upgraded car the tightest corners are
       // STEERING-limited, not grip-limited — ignoring that is what used to
       // send a fast car straight on at the hairpin however early it braked.
-      const rEff = 1 / k + T.ROAD_HALF * LINE_WIDEN;
-      const vCorner = Math.min(Math.sqrt(budget * rEff), TURN_USE * params.maxTurn * rEff);
+      // A tune may plan a WIDER racing line (using more of the road to open the
+      // corner radius) and bank on MORE of its yaw-rate ceiling than the default
+      // — PRO++ does both, which is where its lap time on the top-speed and the
+      // steering-limited circuits (Longshore/Lantern, no chargeable corner)
+      // comes from: those laps are decided by corner speed, and PRO+ leaves 28+
+      // px of road unused. The knobs default to the module constants, so every
+      // other tier is byte-identical.
+      const lineWiden = skill.lineWiden ?? LINE_WIDEN;
+      const turnUse = skill.turnUse ?? TURN_USE;
+      const rEff = 1 / k + T.ROAD_HALF * lineWiden;
+      const vCorner = Math.min(Math.sqrt(budget * rEff), turnUse * params.maxTurn * rEff);
       const dEff = Math.max(0, d - brakeMargin);
       const allow = d === 0 ? vCorner
         : Math.sqrt(vCorner * vCorner + 2 * brakeUse * dEff);
@@ -975,6 +1037,22 @@ export function planVariants(skill, params) {
     out.push({ ...skill, drift: { ...plan, zones: slides } });
     out.push({ ...skill, drift: { ...plan, zones: flicks } });
   }
+  // PRO++ also races a FORCED TIER-2 plan: on a corner the auto-tier logic
+  // sizes for tier 1, escalate to the orange boost and let raceBest keep it
+  // only if the bigger burst actually beat the tier-1 line on the exit that
+  // follows. On tracks with no chargeable corner (Longshore/Lantern) this
+  // derives nothing extra, so it costs a single skipped derivation. Gated on
+  // skill.tryTier2 so PRO+ and every other tier plan exactly as before.
+  if (skill.tryTier2) {
+    const t2 = deriveDriftZones(params, skill, { ...skill.driftTuning, targetTier: 2 });
+    const t2slides = t2.zones.filter(z => z.why === "slide");
+    if (t2slides.length) {
+      out.push({ ...skill, drift: t2 });
+      if (t2slides.length < t2.zones.length) {
+        out.push({ ...skill, drift: { ...t2, zones: t2slides } });
+      }
+    }
+  }
   if (plan.zones.length) out.push({ ...skill, drift: null });
   return out;
 }
@@ -1178,6 +1256,10 @@ export const BOT_TIERS = [
     body: "#4fb8ff", text: "rgba(79,184,255,0.85)" },
   { key: "proplus", skill: "proplus", label: "PRO+", short: "Pro+",
     body: "#ffd23f", text: "rgba(255,210,63,0.85)" },
+  // The fastest bot: a hot magenta so it reads instantly as the front of the
+  // field, distinct from PRO+'s gold and PRO's cyan.
+  { key: "proplusplus", skill: "proplusplus", label: "PRO++", short: "Pro++",
+    body: "#ff3fa6", text: "rgba(255,63,166,0.9)" },
 ];
 
 // Seed offsets tried in order. The first is the canonical harness seed, so a

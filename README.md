@@ -1,7 +1,7 @@
 # Trackcrimental
 
 Incremental top-down 2D drift racer prototype. Line up on an F1 grid, launch at
-GO, and lap **endlessly** against a four-bot pace field. Your **ranked best
+GO, and lap **endlessly** against a five-bot pace field. Your **ranked best
 laps** each replay forever as earning ghosts — ghost #1 is your best lap, #2
 your second best, and so on — paying credits that buy car upgrades and unlock
 more circuits, each of which then earns income at the same time.
@@ -79,7 +79,7 @@ back to `true` and saving works exactly as before.
   barely slows the car (use the brake to slow down)
 - **R** — re-grid: the whole field back on the F1 grid and the **3‑2‑1‑GO
   countdown** re-run (aborts the current lap and resets the endless lap tally)
-- **G** — toggle the NOVICE/MID/PRO/PRO+ bot reference ghosts
+- **G** — toggle the NOVICE/MID/PRO/PRO+/PRO++ bot reference ghosts
 - **Mouse scroll wheel** (over the track) — zoom out to survey most of the
   track, or back in (reset by a refresh while persistence is off)
 - **Track buttons** (top of the side panel: Ember / Longshore / Lantern /
@@ -101,8 +101,8 @@ accelerates off the grid together. **R** re-grids and re-runs the countdown at
 any time.
 
 The field lines up like an F1 grid, staggered back along the start straight:
-**player on POLE, then NOVICE 2nd, MID 3rd, PRO 4th, PRO+ 5th**, each a
-car-length-and-gap further back than the one ahead with a slight left/right
+**player on POLE, then NOVICE 2nd, MID 3rd, PRO 4th, PRO+ 5th, PRO++ 6th**, each
+a car-length-and-gap further back than the one ahead with a slight left/right
 zigzag. The slots are derived from the start-straight geometry (walked backward
 along the centerline, so they follow the track round a corner behind the line
 rather than running off into the grass) and each bot's simulated run *starts
@@ -110,7 +110,7 @@ from its own slot* — so the further-back cars have a longer run to the line an
 the F1 spread falls out of the launch, not from an animation.
 
 **Then it is endless.** There is no fixed race length. After GO the player
-drives freely forever while the four bots loop their flying lap continuously as
+drives freely forever while the five bots loop their flying lap continuously as
 the pace reference. The side panel's *Laps* row is an endless tally. Each lap
 must still hit every checkpoint gate in order (4 gates on Ember and Longshore, 7
 on Lantern) to count — though the gates are generous about *how* you hit them,
@@ -507,7 +507,7 @@ A ~100-second lap breaks assumptions that were safe on a 12-second one:
   `TRACK_LEN`), so a full lap records end-to-end — the player's earning-ghost
   lap *and* the bot recordings. The short circuits are dominated by the old
   floors, so their behaviour is unchanged.
-- **First-visit field sim.** `simulateBotField` runs four bots' whole race on
+- **First-visit field sim.** `simulateBotField` runs five bots' whole race on
   the first visit (then caches). On a ~1.7-min lap a 3-lap field would be a
   multi-second freeze, so a long track records **2 laps, not 3** (a standing
   launch + one flying lap to loop — a chill cruise does not need the extra
@@ -543,13 +543,13 @@ intentional.
 
 ## The bot ghosts (an endless pace field, simulated live)
 
-Four translucent **bot reference ghosts** lap alongside you forever, so you can
+Five translucent **bot reference ghosts** lap alongside you forever, so you can
 calibrate "is it just me". They are **not** a baked recording: `bots.js`
 simulates each bot's whole standing-start race *from its own grid slot*
 headlessly in the browser at load, and again whenever your car changes. The game
 then plays the **standing launch once** (spreading the F1 grid) and **loops the
 first flying lap forever** — both ends of that lap are on the start line, so the
-wrap is seamless. That costs **50-140 ms for the whole four-bot field** and it
+wrap is seamless. That costs **~60-160 ms for the whole five-bot field** and it
 buys two things a baked file cannot:
 
 - **The bots drive YOUR car.** They use the same `carParams(state.levels)` you
@@ -566,7 +566,8 @@ Times on the stock car (lap 1 standing / lap 2 / lap 3 - total, best flying):
 | green **NOVICE** - sloppy keyboard driver, slow reactions | 13.12 | 12.03 | 12.03 | 37.18 | **12.03** |
 | purple **MID** - clean, competent line; never drifts | 11.58 | 10.23 | 10.23 | 32.05 | **10.23** |
 | cyan **PRO** - the optimal *clean* lap | 11.15 | 9.78 | 9.80 | 30.73 | **9.78** |
-| gold **PRO+** - the drift bot | 9.85 | 8.45 | 8.45 | 26.75 | **8.45** |
+| gold **PRO+** - the drift bot (banks tier 1) | 9.85 | 8.45 | 8.45 | 26.75 | **8.45** |
+| magenta **PRO++** - the fastest bot; banks **tier 2** here | 9.60 | 8.18 | 8.18 | 25.97 | **8.18** |
 
 (EMBER LOOP, stock car. Each circuit has its own field: see the per-track
 summary the harness prints.)
@@ -579,6 +580,54 @@ boost onto the straight that follows - worth **1.30 s (11.7%)** over PRO on the
 standing lap.
 Watch it for a live demo of where and how drifting pays.
 
+### PRO++ — the fastest bot, and the tier-2 boost proven
+
+**PRO++** is a clear step above PRO+ on every circuit, and it is the tier that
+actually spends the **full boost (tier 2 / orange)**. It keeps PRO+'s proven-safe
+cornering *base* — the same corner-entry grip budget, brake margin and look-ahead,
+so its line never leaves the road across the whole upgrade space — and adds only
+what buys time without ever running wide:
+
+- **It races a forced tier-2 drift plan** (`tryTier2`) as one of its
+  `raceBest` variants, and keeps it only where the bigger burst actually beats
+  the tier-1 line on the exit that follows. `deriveDriftZones` grew a
+  `targetTier` knob for this; PRO+ and every other tier still plan exactly as
+  before.
+- **A slightly more aggressive line** — `steerGain` 1.6 (vs 1.45), which cuts a
+  little more line, and `turnUse` 0.95 (vs the default 0.85), which banks more
+  of the car's yaw-rate ceiling. Those two are per-skill overrides on the corner
+  planner; it deliberately leaves `latBudget` / `brakeMargin` / `lineWiden`
+  alone, because pushing *those* carried Ember's drift off the road on an
+  upgraded car (which then lost the boost and inverted the ladder).
+
+**Where its time comes from, and the honest per-track tier-2 verdict** (stock
+car, best flying lap; PRO++'s margin over PRO+ in brackets):
+
+| circuit | PRO+ | PRO++ | gain | tier 2 pays? | where the gain comes from |
+|---|---|---|---|---|---|
+| **EMBER** (drift) | 8.45 | **8.18** | **-0.27 s (3.2%)** | **YES — banks tier 2** | both loops exit onto a long straight, so the bigger orange burst has room to run. This is the headline: PRO++ shows an **orange** flame here. |
+| **LANTERN** (grip) | 10.10 | **9.32** | **-0.78 s (7.8%)** | no chargeable corner | `turnUse` — the coil is *steering*-limited, and PRO+ leaves ~28 px of road unused, so banking more of the yaw ceiling is worth a lot. |
+| **LONGSHORE** (top speed) | 12.43 | **12.40** | **-0.03 s (0.3%)** | no chargeable corner | almost nothing: the speedway lap is `length / top speed` (top-speed-bound), so with the same car the only lever is a fractionally tighter line. |
+
+So **tier 2 pays on EMBER only**, and PRO++ is honest about it: on Longshore and
+Lantern *no corner is long enough to bank a charge in at any spec* (the same
+reason PRO+ never drifts there), so there is nothing to escalate to tier 2 —
+PRO++ falls back to the fastest clean/aggressive line rather than forcing a
+slower tier-2 slide. **Longshore is the weak spot**: it is genuinely
+top-speed-bound, so PRO++ can only edge PRO+ by a hair (~2 ticks). *What would
+let tier 2 shine on more tracks:* a slideable sweeper (radius ~150, ≥ 25° of
+turn) exiting onto a long straight — Ember's launch loop → boost straight is
+exactly that shape. Longshore's radius-260 corners are too open to bank a charge
+and its straights already run at top speed; a tighter corner feeding a longer
+straight would give PRO++ an orange boost to spend there too.
+
+PRO++'s speed comes from the boost and the yaw ceiling, **not** from riding the
+edge: it keeps a healthy on-road margin on every circuit (stock car ~20 px on
+Ember, ~28 px on Lantern, ~31 px on Longshore — a touch tighter than PRO+ but
+nowhere near the edge), and the harness gates it at **≥ 3 px inside the road
+edge** on its shipped laps and asserts it **never** leaves the road across the
+whole upgrade sweep.
+
 Every tier picks the strategy that is actually fastest on your car: a
 `drift: "auto"` bot races its whole derived plan, each half of it and its own
 clean line, and keeps the quickest (see *Strategy selection*).
@@ -589,7 +638,7 @@ each tier's best **flying** lap, since that is the like-for-like comparison
 against your own laps 2 and 3; hover a time to see its standing lap too.
 
 They earn nothing - they are pure pace references. The whole field grids up F1
-style (player on pole, the four bots on slots 1..4 further back) and holds until
+style (player on pole, the five bots on slots 1..5 further back) and holds until
 GO: the countdown reaches zero and **everyone launches together with no player
 input required**, a fair standing start that tests acceleration equally. Each
 bot then loops its flying lap endlessly. Toggle them with **G**.
@@ -850,7 +899,7 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   + G toggle.
 - `bots.js` — the bot drivers, imported by BOTH the game and the harness (so
   what the harness gates is exactly what you race). Skill presets (novice /
-  average / expert / pro / proplus); `pursuitSteer()`, the physical
+  average / expert / pro / proplus / proplusplus); `pursuitSteer()`, the physical
   pure-pursuit steering law (demanded yaw rate / available yaw rate x the
   tune's aggression); the corner planner with its reaction-TIME braking
   margin, yaw-rate budget, racing-line widening and reaction-limited pace
@@ -866,7 +915,7 @@ after which Boost Power/Duration are worth 9.5% a lap on the drift circuit.
   whole-run telemetry (brake ticks, the slowest point, handbrake/boost use, so
   the harness can prove the clean line is not flat out), and returns `null` if
   any lap is invalid. On top of that, `simulateBotField(params)` /
-  `botField(params)` produce the whole four-tier reference field for a given car
+  `botField(params)` produce the whole five-tier reference field for a given car
   — each bot started from *its own F1 grid slot* (`T.gridSlot(1..4)`) so the
   launch spreads the field — memoised on (car spec + `TRACK_SIGNATURE`) in an
   8-slot LRU so re-grids are free, only an upgrade purchase re-runs the physics,
@@ -935,7 +984,7 @@ per-track summary, the per-track runoff and cutting report, three sweep tables,
 the upgrade-sensitivity table, the value-per-credit table and the Cape Cruise
 summary. It also carries light checks on the endless-model
 plumbing — the F1 grid slots are distinct, ordered pole→5th and on-road on
-every circuit, **and the four bots' actual simulated recordings begin at their
+every circuit, **and the five bots' actual simulated recordings begin at their
 assigned slots (1..4), mutually distinct** (so a "computed but unused" grid
 regression can't recur); ranked-lap insertion stays sorted and capped; and the
 Ghost Fleet buy-gate math never lets the fleet exceed the recorded-lap count —
@@ -1058,7 +1107,7 @@ drives.
   walked backward along the centerline so they stay on-road on every circuit).
   Each bot's run starts from *its own slot*, so the standing launch spreads the
   field into an F1 stagger naturally
-- Bot reference ghosts: a four-tier skill ladder, **re-simulated per circuit**
+- Bot reference ghosts: a five-tier skill ladder, **re-simulated per circuit**
   — on Ember, NOVICE (green, timid, 12.03 s flying on the stock car), MID
   (purple, clean line, no drift, 10.23 s), PRO (cyan, the optimal clean lap,
   never drifts, 9.78 s) and PRO+ (gold, slides both loops and fires the banked

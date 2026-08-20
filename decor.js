@@ -18,10 +18,10 @@
 // deterministic (identical across frames and reloads), regenerated only when the
 // track changes and CACHED per signature (flipping back is instant).
 //
-// It imports track.js at the SAME ?v=9 token every other module uses — a
+// It imports track.js at the SAME ?v=10 token every other module uses — a
 // different token would split track.js into a second instance and break the
 // per-track live bindings.
-import * as T from "./track.js?v=9";
+import * as T from "./track.js?v=10";
 
 // ---------------------------------------------------------------- palette
 //

@@ -24,12 +24,12 @@ import {
   TICK, G_PX, SURFACE, carParams, legacyParams, createCarState, stepCar, slipAngle,
   ZERO_LEVELS, DRIVING_UPGRADES, UPGRADE_BY_ID, levelsForBudget,
   insertRankedLap, fleetSize, RANKED_LAPS_CAP,
-} from "../physics.js?v=9";
+} from "../physics.js?v=10";
 import {
   SKILLS, runBot, recordRace, raceBest, deriveDriftZones, mulberry32,
   simulateBotField, BOT_TIERS,
-} from "../bots.js?v=9";
-import * as T from "../track.js?v=9";
+} from "../bots.js?v=10";
+import * as T from "../track.js?v=10";
 
 // ---------------------------------------------------------------- scripted feature tests
 
@@ -383,7 +383,7 @@ function sweepCombos(mode = "full") {
 function upgradeSweep(mode = "full") {
   const t0 = Date.now();
   const tiers = [["novice", "novice"], ["mid", "expert"], ["pro", "pro"],
-    ["proplus", "proplus"]];
+    ["proplus", "proplus"], ["proplusplus", "proplusplus"]];
   const cache = new Map();
   const specKey = lv => DRIVING_UPGRADES.map(k => lv[k] || 0).join(",");
   const at = lv => {
@@ -424,7 +424,8 @@ function upgradeSweep(mode = "full") {
     for (const [tier] of tiers) {
       if (lap(tier) === null) invalid.push(`${specKey(combo)} ${tier} could not race 3 clean laps`);
     }
-    for (const [a, b] of [["proplus", "pro"], ["pro", "mid"], ["mid", "novice"]]) {
+    for (const [a, b] of [["proplusplus", "proplus"], ["proplus", "pro"],
+      ["pro", "mid"], ["mid", "novice"]]) {
       if (lap(a) !== null && lap(b) !== null && lap(a) >= lap(b)) {
         ordFails.push(`${specKey(combo)}: ${a} ${lap(a).toFixed(2)}s >= ${b} ${lap(b).toFixed(2)}s`);
       }
@@ -455,7 +456,8 @@ function upgradeSweep(mode = "full") {
   console.log(`  driving upgrades: ${DRIVING_UPGRADES.join(", ")}` +
     "   (Lap Payout / Ghost Fleet are economy only and excluded)");
   console.log("  " + pad("sp,ac,gr,bp,bd", 16) + padL("novice", 9) + padL("mid", 9) +
-    padL("pro", 9) + padL("proplus", 9) + "  " + pad("top", 6) + pad("PRO+ drift plan", 26));
+    padL("pro", 9) + padL("proplus", 9) + padL("pro++", 9) + "  " + pad("top", 6) +
+    pad("PRO+ drift plan", 26));
   for (const [combo, here] of rows) {
     const zones = here.zones.map(z =>
       `${z.why[0]}${(100 * z.from).toFixed(0)}-${(100 * z.to).toFixed(0)}`).join(" ") || "-";
@@ -608,6 +610,12 @@ const TRACK_EXPECT = {
     pace: [8, 16],          // MID's best flying lap, seconds
     liftFrac: 0.85,         // PRO's slowest FLYING-lap speed, x top speed
     driftPays: { secs: 0.6, frac: 0.06 },   // vs the clean line, standing lap
+    // TIER 2 PAYS HERE, and only here: both loops exit onto hundreds of px of
+    // straight (the boost straight, and the run to the line) — enough room to
+    // spend the bigger orange burst. PRO++ banks tier 2 on this circuit; the
+    // check below asserts it. The speedway and the coil have no chargeable
+    // corner at all, so there is nothing to escalate and tier2Pays is unset.
+    tier2Pays: true,
     wobble: 3.8,
   },
   longshore: {
@@ -667,7 +675,7 @@ function gridChecks(tracks) {
   const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 1.5;
   for (const id of tracks) {
     T.setTrack(id);
-    const slots = [0, 1, 2, 3, 4].map(k => T.gridSlot(k));
+    const slots = [0, 1, 2, 3, 4, 5].map(k => T.gridSlot(k));
     // Arc length behind the start line, per slot (the line is at arc 0).
     const behind = slots.map(s => {
       const i = T.nearestIndex(s.x, s.y);
@@ -681,11 +689,11 @@ function gridChecks(tracks) {
     }
     for (const s of slots) if (T.surfaceAt(s.x, s.y) !== SURFACE.ROAD) onRoad = false;
 
-    // Simulate the real four-bot field and check where each recording BEGINS.
+    // Simulate the real five-bot field and check where each recording BEGINS.
     const field = simulateBotField(carParams(ZERO_LEVELS));
-    // Field order follows BOT_TIERS (novice, mid, pro, proplus) = slots 1..4.
+    // Field order follows BOT_TIERS (novice, mid, pro, proplus, proplusplus) = slots 1..5.
     const starts = field.map(g => g.samples[0]);
-    let startsAtSlot = field.length === 4;
+    let startsAtSlot = field.length === 5;
     field.forEach((g, ti) => {
       const slot = T.gridSlot(ti + 1);
       if (!near(g.samples[0], [slot.x, slot.y])) startsAtSlot = false;
@@ -702,12 +710,12 @@ function gridChecks(tracks) {
       `${g.short} (${g.samples[0][0].toFixed(0)},${g.samples[0][1].toFixed(0)})`).join("  "));
 
     checks.push(
-      [`[${id}] grid slots are distinct and ordered pole -> 5th (each further back)`,
+      [`[${id}] grid slots are distinct and ordered pole -> 6th (each further back)`,
         ordered && distinct],
       [`[${id}] every grid slot sits on the racing surface`, onRoad],
-      [`[${id}] the four bot recordings actually START at their grid slots (1..4)`,
+      [`[${id}] the five bot recordings actually START at their grid slots (1..5)`,
         startsAtSlot],
-      [`[${id}] the four bot start positions are mutually distinct (no stacking on pole)`,
+      [`[${id}] the five bot start positions are mutually distinct (no stacking on pole)`,
         startsDistinct]);
   }
   return checks;
@@ -1013,16 +1021,21 @@ function trackChecks(results) {
   // furthest the car ever got from the centerline, so this is free.
   const edgeMargin = rec => T.ROAD_HALF - rec.maxDist;
   const RACE_TIERS = [["novice", "novice"], ["mid", "expert"],
-    ["pro", "pro"], ["proplus", "proplus"]];
+    ["pro", "pro"], ["proplus", "proplus"], ["proplusplus", "proplusplus"]];
   const races = {};
   for (const [ghost, skillName] of RACE_TIERS) {
     // raceBest, not recordRace: this is exactly what the game grids up, so a
     // drift-capable tier is gated on the strategy it actually races.
     races[ghost] = raceBest(SKILLS[skillName], p, { laps: 3 });
   }
-  const proRec = races.pro, ppRec = races.proplus;
+  const proRec = races.pro, ppRec = races.proplus, pppRec = races.proplusplus;
   const proMargin = proRec ? edgeMargin(proRec) : -Infinity;
   const ppMargin = ppRec ? edgeMargin(ppRec) : -Infinity;
+  const pppMargin = pppRec ? edgeMargin(pppRec) : -Infinity;
+  // PRO++ vs PRO+ on the best FLYING lap (the looped, gated one): the headline
+  // "genuinely faster" number, per track.
+  const pppGain = ppRec && pppRec
+    ? (ppRec.bestFlyingTicks - pppRec.bestFlyingTicks) * TICK : null;
   const proLap = proRec ? proRec.lapTicks[0] * TICK : null;
   const ppLap = ppRec ? ppRec.lapTicks[0] * TICK : null;
   const driftGain = proLap !== null && ppLap !== null ? proLap - ppLap : null;
@@ -1034,14 +1047,14 @@ function trackChecks(results) {
   const proFlyMin = slowest ? slowest.minSpeed : Infinity;
 
   console.log(`\n${T.TRACK_NAME} — 3-lap race recordings (lap 1 standing, laps 2-3 flying):`);
-  console.log("  " + pad("tier", 9) + pad("lap 1", 9) + pad("lap 2", 9) +
+  console.log("  " + pad("tier", 12) + pad("lap 1", 9) + pad("lap 2", 9) +
     pad("lap 3", 9) + pad("total", 9) + pad("best fly", 10) + pad("fly gain", 10) +
     pad("margin", 9) + pad("boosts", 9));
   for (const [ghost] of RACE_TIERS) {
     const r = races[ghost];
-    if (!r) { console.log(`  ${pad(ghost, 9)}FAILED — no 3 valid laps`); continue; }
+    if (!r) { console.log(`  ${pad(ghost, 12)}FAILED — no 3 valid laps`); continue; }
     const gain = (r.lapTicks[0] - r.bestFlyingTicks) * TICK;
-    console.log("  " + pad(ghost, 9) +
+    console.log("  " + pad(ghost, 12) +
       r.lapTicks.map(t => pad(f(t * TICK), 9)).join("") +
       pad(f(r.totalTicks * TICK), 9) + pad(f(r.bestFlyingTicks * TICK), 10) +
       pad(`-${gain.toFixed(2)}s`, 10) + pad(f(edgeMargin(r), 1), 9) +
@@ -1050,7 +1063,11 @@ function trackChecks(results) {
   console.log(`  drift line pays ${driftGain === null ? "n/a" : driftGain.toFixed(2) + "s"}` +
     `${driftGain !== null && proLap ? ` (${(100 * driftGain / proLap).toFixed(1)}%)` : ""}` +
     ` on the standing lap; edge margin pro ${proMargin.toFixed(1)} px,` +
-    ` proplus ${ppMargin.toFixed(1)} px`);
+    ` proplus ${ppMargin.toFixed(1)} px, proplusplus ${pppMargin.toFixed(1)} px`);
+  console.log(`  PRO++ vs PRO+ (best flying lap): ${pppGain === null ? "n/a" :
+    (pppGain >= 0 ? "-" : "+") + Math.abs(pppGain).toFixed(3) + "s"}` +
+    `${pppGain !== null && ppRec ? ` (${(100 * pppGain / (ppRec.bestFlyingTicks * TICK)).toFixed(1)}%)` : ""}` +
+    `; PRO++ banks tier ${pppRec ? pppRec.maxTierFired : "-"}, ${pppRec ? pppRec.boostFires : 0} boost(s)/race`);
   if (proRec) {
     console.log(`  clean-line lift: PRO brakes for ${(proRec.brakeTicks * TICK).toFixed(2)}s` +
       ` of its race; slowest FLYING-lap point ${proFlyMin.toFixed(0)} px/s` +
@@ -1079,6 +1096,9 @@ function trackChecks(results) {
       pro.bestLap < exp.bestLap && pro.handbrakeTicks === 0],
     [q("proplus best beats pro best"),
       pp.bestLap !== null && pro.bestLap !== null && pp.bestLap < pro.bestLap],
+    [q("proplusplus best beats proplus best"),
+      pppRec !== null && ppRec !== null &&
+      pppRec.bestFlyingTicks < ppRec.bestFlyingTicks],
     // ENDLESS MODEL: the game grids everyone up, launches at GO, and the bots
     // then loop their flying lap forever. So what has to hold is that each bot
     // strings consecutive valid laps (the field loops these) and that a flying
@@ -1088,16 +1108,29 @@ function trackChecks(results) {
     [q("a flying lap is faster than the gridded standing launch"),
       RACE_TIERS.every(([g]) => races[g] &&
         races[g].bestFlyingTicks < races[g].lapTicks[0])],
-    [q("tier ladder holds on best flying lap (proplus < pro < mid < novice)"),
+    [q("tier ladder holds on best flying lap (proplusplus < proplus < pro < mid < novice)"),
       RACE_TIERS.every(([g]) => races[g]) &&
+      races.proplusplus.bestFlyingTicks < races.proplus.bestFlyingTicks &&
       races.proplus.bestFlyingTicks < races.pro.bestFlyingTicks &&
       races.pro.bestFlyingTicks < races.mid.bestFlyingTicks &&
       races.mid.bestFlyingTicks < races.novice.bestFlyingTicks],
+    // PRO++ must beat PRO+ by a REAL margin, not a rounding artefact. Threshold:
+    // 0.02 s (> 1 physics tick of 0.0167 s), which the speedway — genuinely
+    // top-speed-bound, so its only lever is a slightly tighter line — clears at
+    // ~0.03 s, while the drift and the coil clear it by ~0.27 s / ~0.78 s. The
+    // gap is honest and varies with the track, and the harness prints it above.
+    [q("proplusplus beats proplus by a real margin (>= 0.02 s on best flying lap)"),
+      pppGain !== null && pppGain >= 0.02],
     // ---- on-road margin: a "faster" tune that scrapes the grass is fragile ----
     [q("pro 3-lap race stays >= 8 px inside the road edge"),
       proRec !== null && proMargin >= 8],
     [q("proplus 3-lap race stays >= 3 px inside the road edge"),
       ppRec !== null && ppMargin >= 3],
+    // PRO++ is allowed to run closer than PRO/PRO+ (a tighter line is where some
+    // of its time comes from), but it must NEVER leave the road: >= 3 px inside
+    // the edge on its shipped 3-lap race, on every track.
+    [q("proplusplus 3-lap race stays >= 3 px inside the road edge"),
+      pppRec !== null && pppMargin >= 3],
     // ---- per-track design intent ----
     [q(`PRO's clean line lifts below ${(100 * want.liftFrac).toFixed(0)}% of top speed`),
       proRec !== null && proRec.brakeTicks > 0 &&
@@ -1115,6 +1148,13 @@ function trackChecks(results) {
       `${(100 * want.driftPays.frac).toFixed(0)}% over the clean line (standing start)`),
       driftGain !== null && proLap !== null &&
       driftGain >= want.driftPays.secs && driftGain / proLap >= want.driftPays.frac]);
+    if (want.tier2Pays) {
+      // The claim that PRO++ genuinely USES the full boost here: its shipped
+      // race must bank a tier-2 (orange) charge. This is what the orange ghost
+      // flame in-game confirms visually.
+      checks.push([q("proplusplus banks TIER 2 (the full/orange boost) here"),
+        pppRec !== null && pppRec.maxTierFired >= 2 && pppRec.boostFires > 0]);
+    }
   } else {
     checks.push([q("drift optional here: proplus still leads without needing a boost"),
       ppRec !== null && proRec !== null &&
@@ -1135,9 +1175,11 @@ function trackChecks(results) {
     mid: races.mid ? races.mid.bestFlyingTicks * TICK : null,
     pro: races.pro ? races.pro.bestFlyingTicks * TICK : null,
     proplus: races.proplus ? races.proplus.bestFlyingTicks * TICK : null,
-    novOff: nov.offRoadPct, margin: Math.min(proMargin, ppMargin),
+    proplusplus: races.proplusplus ? races.proplusplus.bestFlyingTicks * TICK : null,
+    pppGain, pppTier: pppRec ? pppRec.maxTierFired : 0,
+    novOff: nov.offRoadPct, margin: Math.min(proMargin, ppMargin, pppMargin),
     liftPct: 100 * proFlyMin / p.topSpeed,
-    boosts: races.proplus ? races.proplus.boostFires : 0,
+    boosts: races.proplusplus ? races.proplusplus.boostFires : 0,
   };
   return { checks, summary };
 }
@@ -1169,14 +1211,14 @@ function cruiseChecks(maxDesignedSecs) {
   const by = Object.fromEntries(field.map(g => [g.key, g]));
   const nov = by.novice, mid = by.mid, pro = by.pro, pp = by.proplus;
 
-  // Grid: five slots ordered pole->5th, distinct, on-road, and the four bot
+  // Grid: six slots ordered pole->6th, distinct, on-road, and the five bot
   // recordings actually START at their slots.
-  const slots = [0, 1, 2, 3, 4].map(k => T.gridSlot(k));
+  const slots = [0, 1, 2, 3, 4, 5].map(k => T.gridSlot(k));
   const behind = slots.map(s => {
     const i = T.nearestIndex(s.x, s.y);
     return ((T.TRACK_LEN - T.CUMLEN[i]) % T.TRACK_LEN + T.TRACK_LEN) % T.TRACK_LEN;
   });
-  let gridOK = field.length === 4;
+  let gridOK = field.length === 5;
   for (let k = 1; k < slots.length; k++) {
     if (!(behind[k] > behind[k - 1] + 1)) gridOK = false;
     if (Math.hypot(slots[k].x - slots[k - 1].x, slots[k].y - slots[k - 1].y) < 10) gridOK = false;
@@ -1194,7 +1236,7 @@ function cruiseChecks(maxDesignedSecs) {
 
   // Ladder + a small monotonicity sample.
   const TIERS = [["novice", "novice"], ["mid", "expert"], ["pro", "pro"],
-    ["proplus", "proplus"]];
+    ["proplus", "proplus"], ["proplusplus", "proplusplus"]];
   const lapOf = (sk, lv) => {
     const r = raceBest(SKILLS[sk], carParams(lv), { laps: 2 });
     return r ? r.bestFlyingTicks * TICK : null;
@@ -1208,13 +1250,22 @@ function cruiseChecks(maxDesignedSecs) {
   for (const [name, lv] of Object.entries(specs)) {
     lap[name] = TIERS.map(([, sk]) => lapOf(sk, lv));
   }
+  // PRO++'s edge over PRO+ needs a LEVER — a chargeable drift corner (tier 2)
+  // or a steering-limited one (a tighter line). The cruise is a wide-open,
+  // uniformly gentle loop (min radius 660 px, no drift plan at any spec), so it
+  // offers PRO++ nothing to exploit and the two tiers run within a physics tick
+  // of each other — at grip Lv6 they land dead level. That is the SAME reason
+  // the cruise is exempt from the differentiation gates, so the honest ladder
+  // for the top pair HERE is "PRO++ is never slower than PRO+" (<=). Every other
+  // rung stays strict, and on all three DESIGNED circuits PRO++ beats PRO+ by a
+  // real margin (see the strict ladder + margin gates in trackChecks).
   const orderOK = row => row.every(v => v !== null) &&
-    row[3] < row[2] && row[2] < row[1] && row[1] < row[0];
+    row[4] <= row[3] && row[3] < row[2] && row[2] < row[1] && row[1] < row[0];
   const ladderStock = orderOK(lap.stock);
   const orderAll = Object.values(lap).every(orderOK);
   let monoOK = true;
   for (const [lo, hi] of [["speed6", "speed7"], ["grip6", "grip7"], ["accel6", "accel7"]]) {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       if (lap[lo][i] === null || lap[hi][i] === null || lap[hi][i] > lap[lo][i] * 1.01) monoOK = false;
     }
   }
@@ -1240,12 +1291,12 @@ function cruiseChecks(maxDesignedSecs) {
     `mid flying lap ${(midFly * TICK).toFixed(1)}s vs designed max ${maxDesignedSecs.toFixed(1)}s`);
 
   return [
-    [q("the four reference bots all complete the 2-lap field"), field.length === 4],
+    [q("the five reference bots all complete the 2-lap field"), field.length === 5],
     [q("grid slots ordered/distinct/on-road AND bot recordings start at them"), gridOK],
     [q("novice cruises it: a full valid 2-lap race"), !!novRec],
     [q("novice stays out of the grass (0%) and mostly on the road (< 3% off)"),
       novGrassPct === 0 && novOffPct < 3],
-    [q("tier ladder holds on best flying lap (proplus < pro < mid < novice)"), ladderStock],
+    [q("tier ladder holds on best flying lap (proplusplus < proplus < pro < mid < novice)"), ladderStock],
     [q("ladder holds across the small upgrade sample too"), orderAll],
     [q("monotonic on the small sample: +1 level never makes a bot slower"), monoOK],
     [q("no drift plan here (a chill cruise has no chargeable corner)"),
@@ -1328,15 +1379,18 @@ function main() {
   console.log("\nPER-TRACK SUMMARY (best flying lap, stock car):");
   console.log("  " + pad("track", 12) + pad("designed for", 16) + padL("len px", 8) +
     padL("road", 6) + padL("cnrs", 6) + padL("cps", 5) + padL("novice", 9) +
-    padL("mid", 8) + padL("pro", 8) + padL("pro+", 8) + padL("nov off%", 10) +
-    padL("margin", 8) + padL("PRO lift", 10) + padL("pro+ boosts", 13));
+    padL("mid", 8) + padL("pro", 8) + padL("pro+", 8) + padL("pro++", 8) +
+    padL("++vs+", 9) + padL("nov off%", 10) +
+    padL("margin", 8) + padL("PRO lift", 10) + padL("++ boosts", 12));
   for (const s of summaries) {
     console.log("  " + pad(s.id, 12) + pad(s.skill, 16) + padL(s.len.toFixed(0), 8) +
       padL(2 * s.road, 6) + padL(s.corners, 6) + padL(s.cps, 5) +
       padL(f(s.novice), 9) + padL(f(s.mid), 8) + padL(f(s.pro), 8) +
-      padL(f(s.proplus), 8) + padL(f(s.novOff, 2), 10) +
+      padL(f(s.proplus), 8) + padL(f(s.proplusplus), 8) +
+      padL((s.pppGain === null ? "–" : `-${s.pppGain.toFixed(2)}s` +
+        (s.pppTier >= 2 ? " t2" : "")), 9) + padL(f(s.novOff, 2), 10) +
       padL(f(s.margin, 1), 8) + padL(s.liftPct.toFixed(0) + "%", 10) +
-      padL(s.boosts, 13));
+      padL(s.boosts, 12));
   }
 
   // ---- the upgrade-space sweep, per track ----
